@@ -166,7 +166,7 @@ jobs:
       - name: Host logs
         if: failure() || cancelled()
         run: |
-          for f in ~/Library/Caches/simless/slots/*/host.log ~/Library/Caches/simless/work/*/build.log \
+          for f in ~/Library/Caches/simless/work/*/slots/*/host.log ~/Library/Caches/simless/work/*/build.log \
                    ~/Library/Caches/simless/work/*/ui-artifacts/*.log; do
             [ -f "$f" ] || continue
             echo "::group::$f"; tail -n 200 "$f"; echo "::endgroup::"

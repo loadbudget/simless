@@ -63,4 +63,13 @@ final class SlotNumberTests: XCTestCase {
         XCTAssertThrowsError(try state.assign(bundleBase: "com.example.notes", worktree: first, kind: nil, port: port))
         XCTAssertEqual(state.slots.map(\.worktree), [second])
     }
+
+    /// Each worktree keeps its slots in its own file, so the clash is with another file's slot.
+    func testAClashWithAnotherWorktreesFileThrows() {
+        let taken = SlotRecord(bundleBase: "com.example.notes", n: slotNumber(forWorktree: first), worktree: second, port: 47800)
+        var state = GlobalState()
+        XCTAssertThrowsError(try state.assign(bundleBase: "com.example.notes", worktree: first, kind: nil,
+                                              others: [taken], port: port))
+        XCTAssertTrue(state.slots.isEmpty)
+    }
 }

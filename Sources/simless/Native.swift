@@ -319,8 +319,11 @@ enum Native {
     }
 
     /// Processes running the slot's app (any copy of it under the slot's folder).
-    static func pids(_ slot: SlotRecord) -> [pid_t] {
-        let prefix = appDir(slot) + "/"
+    static func pids(_ slot: SlotRecord) -> [pid_t] { pids(under: appDir(slot)) }
+
+    /// Processes whose executable is under `dir`.
+    static func pids(under dir: String) -> [pid_t] {
+        let prefix = dir + "/"
         return allPids().filter { path(of: $0)?.hasPrefix(prefix) ?? false }
     }
 
@@ -335,24 +338,28 @@ enum Native {
     private static func path(of pid: pid_t) -> String? {
         var buf = [CChar](repeating: 0, count: 4096)
         guard proc_pidpath(pid, &buf, UInt32(buf.count)) > 0 else { return nil }
-        // Paths under /tmp come back as /private/tmp.
+        // Paths under /tmp come back as /private/tmp. Every slot folder is under
+        // the cache folder, so a cache outside /private keeps them comparable.
         let p = String(cString: buf)
-        return p.hasPrefix("/private/") && !Paths.slots.hasPrefix("/private/") ? String(p.dropFirst("/private".count)) : p
+        return p.hasPrefix("/private/") && !Paths.cache.hasPrefix("/private/") ? String(p.dropFirst("/private".count)) : p
     }
 
     /// Terminates every process of the slot, escalating to SIGKILL.
-    static func terminate(_ slot: SlotRecord) {
-        var running = pids(slot)
+    static func terminate(_ slot: SlotRecord) { terminate(under: appDir(slot)) }
+
+    /// Terminates every process whose executable is under `dir`, escalating to SIGKILL.
+    static func terminate(under dir: String) {
+        var running = pids(under: dir)
         guard !running.isEmpty else { return }
         running.forEach { kill($0, SIGTERM) }
         let deadline = now() + 3
         while now() < deadline {
-            running = pids(slot)
+            running = pids(under: dir)
             if running.isEmpty { return }
             Thread.sleep(forTimeInterval: 0.05)
         }
         running.forEach { kill($0, SIGKILL) }
         let hard = now() + 2
-        while now() < hard, !pids(slot).isEmpty { Thread.sleep(forTimeInterval: 0.05) }
+        while now() < hard, !pids(under: dir).isEmpty { Thread.sleep(forTimeInterval: 0.05) }
     }
 }

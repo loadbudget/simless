@@ -404,10 +404,12 @@ enum TestBundles {
 /// The host's own files, which only the app itself may touch.
 enum Housekeeping {
     /// Whether a folder belongs to this app alone: inside its sandbox container,
-    /// or inside its simless slot (a native host's home).
+    /// or inside its simless slot (a native host's home), which is in the
+    /// `slots` folder of its worktree's work folder.
     static func isAppData(_ dir: String) -> Bool {
         let path = URL(fileURLWithPath: dir).standardizedFileURL.path
-        return path.contains("/Library/Containers/") || path.contains("/Library/Caches/simless/slots/")
+        return path.contains("/Library/Containers/")
+            || path.range(of: "/Library/Caches/simless/work/[^/]+/slots/[^/]+", options: .regularExpression) != nil
     }
 
     /// Removes everything inside `dir`, keeping `dir`. With `keepFolders`,

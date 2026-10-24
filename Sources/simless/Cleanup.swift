@@ -16,11 +16,13 @@ enum Cleanup {
     static let keepPatches = 3
     static let compileCacheLimitGB = 8.0
 
-    /// Stops the host, unregisters the install, deletes the slot directory.
-    static func removeSlot(_ slot: SlotRecord) {
+    /// Stops the host, unregisters the install, deletes the slot directory:
+    /// `dir`, for a slot whose folder isn't `slot.dir` (an old layout's).
+    static func removeSlot(_ slot: SlotRecord, dir: String? = nil) {
         Slots.stop(slot)
         Slots.terminateAll(slot)   // test and UI-test hosts don't answer the render protocol
-        removeSlotDir(slot.dir)
+        if let dir { Native.terminate(under: "\(dir)/Native") }
+        removeSlotDir(dir ?? slot.dir)
     }
 
     private static func removeSlotDir(_ dir: String) {
@@ -107,51 +109,75 @@ enum Cleanup {
 
     /// Cheap enough to run on every invocation.
     static func collectGarbage() {
-        _ = try? withLock("state") {
-            var state = GlobalState.load()
-            let gone = state.slots.filter { goneForGood($0.worktree) }
-            for slot in gone {
-                Log.step("cleaning up \(slot.slotID): worktree \(slot.worktree) no longer exists")
-                removeSlot(slot)
-                try? FileManager.default.removeItem(atPath: Paths.workDir(forWorktree: slot.worktree))
-            }
-            state.slots.removeAll { s in gone.contains { $0.slotID == s.slotID } }
-            if !gone.isEmpty { try state.save() }
+        migrateLegacyState()
+        let work = "\(Paths.cache)/work"
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: work)) ?? [] {
+            collectGarbage(workDir: "\(work)/\(name)", lock: GlobalState.lockName(hash: String(name.prefix { $0 != "-" })))
+        }
+        // Crash reports of simless hosts, after a day.
+        removeCrashReports(olderThan: 86_400)
+        Native.removeOrphanPreferences(known: Set(GlobalState.all().map(\.slotID)))
+    }
 
-            // Slot dirs no record points at (e.g. after a crash mid-`simless up`).
-            let known = Set(state.slots.map(\.slotID))
-            for dir in (try? FileManager.default.contentsOfDirectory(atPath: Paths.slots)) ?? [] where !known.contains(dir) {
-                removeSlotDir("\(Paths.slots)/\(dir)")
-            }
-            // Worktrees that exist but haven't used simless for two weeks: their
-            // hosts, slots and builds go (`simless up` makes them again).
-            let stale = state.slots.filter { slot in
-                let work = Paths.workDir(forWorktree: slot.worktree)
-                let used = exists("\(work)/last-used") ? mtime("\(work)/last-used") : mtime(work)
-                return used > 0 && Date().timeIntervalSinceReferenceDate - used > unusedDays * 86_400
-            }
-            for slot in stale {
-                Log.step("cleaning up \(slot.slotID): \(slot.worktree) hasn't used simless for \(Int(unusedDays)) days")
-                removeSlot(slot)
-                try? FileManager.default.removeItem(atPath: Paths.workDir(forWorktree: slot.worktree))
-            }
-            if !stale.isEmpty {
-                state.slots.removeAll { s in stale.contains { $0.slotID == s.slotID } }
-                try state.save()
-            }
-            // Crash reports of simless hosts, after a day.
-            removeCrashReports(olderThan: 86_400)
-            Native.removeOrphanPreferences(known: Set(state.slots.map(\.slotID)))
-            // Build caches of worktrees that no longer exist.
-            let work = "\(Paths.cache)/work"
-            for dir in (try? FileManager.default.contentsOfDirectory(atPath: work)) ?? [] {
-                let owner = try? String(contentsOfFile: "\(work)/\(dir)/worktree.txt", encoding: .utf8)
-                // Unmarked and recent: possibly being created right now.
-                let recent = Date().timeIntervalSinceReferenceDate - mtime("\(work)/\(dir)") < 1800
-                if owner.map({ goneForGood($0) }) ?? !recent {
-                    try? FileManager.default.removeItem(atPath: "\(work)/\(dir)")
+    /// One worktree's folder: all of it when its worktree is gone or hasn't
+    /// used simless for `unusedDays` (its slots first, so their hosts stop and
+    /// their installs are unregistered), else its slot folders no record names.
+    private static func collectGarbage(workDir dir: String, lock: String) {
+        _ = try? withLock(lock) {
+            let slots = GlobalState.load(path: "\(dir)/state.json").slots
+            let owner = (try? String(contentsOfFile: "\(dir)/worktree.txt", encoding: .utf8)) ?? slots.first?.worktree
+            // Unmarked and recent: possibly being created right now.
+            let recent = Date().timeIntervalSinceReferenceDate - mtime(dir) < 1800
+            if let owner, goneForGood(owner) {
+                for slot in slots {
+                    Log.step("cleaning up \(slot.slotID): worktree \(slot.worktree) no longer exists")
+                    removeSlot(slot)
                 }
+            } else if owner == nil && !recent {
+                for slot in slots { removeSlot(slot) }
+            } else if !slots.isEmpty, lastUsed(dir) > 0, Date().timeIntervalSinceReferenceDate - lastUsed(dir) > unusedDays * 86_400 {
+                // The worktree exists but hasn't used simless for a while: its
+                // hosts, slots and builds go (`simless up` makes them again).
+                for slot in slots {
+                    Log.step("cleaning up \(slot.slotID): \(slot.worktree) hasn't used simless for \(Int(unusedDays)) days")
+                    removeSlot(slot)
+                }
+            } else {
+                // Slot dirs no record points at (e.g. after a crash mid-`simless up`).
+                let known = Set(slots.map(\.slotID))
+                for slotDir in (try? FileManager.default.contentsOfDirectory(atPath: "\(dir)/slots")) ?? [] where !known.contains(slotDir) {
+                    removeSlotDir("\(dir)/slots/\(slotDir)")
+                }
+                return
             }
+            try? FileManager.default.removeItem(atPath: dir)
+        }
+    }
+
+    /// The slot folders of the old shared layout to remove, each with the
+    /// record that names it (nil for a folder no record names).
+    static func legacySlotDirs(_ state: GlobalState, folders: [String], legacySlots: String = Paths.legacySlots)
+        -> [(slot: SlotRecord?, dir: String)] {
+        let named = Set(state.slots.map(\.slotID))
+        return state.slots.map { (slot: $0, dir: "\(legacySlots)/\($0.slotID)") }
+            + folders.filter { !named.contains($0) }.map { (slot: nil, dir: "\(legacySlots)/\($0)") }
+    }
+
+    /// Removes, once, the slots of the old layout, where one `state.json` and
+    /// one `slots/` folder held every worktree's. Under the old "state" lock,
+    /// so an older simless running now doesn't write them meanwhile.
+    static func migrateLegacyState() {
+        guard exists(Paths.legacyStatePath) || exists(Paths.legacySlots) else { return }
+        _ = try? withLock("state") {
+            guard exists(Paths.legacyStatePath) || exists(Paths.legacySlots) else { return }
+            let state = GlobalState.load(path: Paths.legacyStatePath)
+            let folders = (try? FileManager.default.contentsOfDirectory(atPath: Paths.legacySlots)) ?? []
+            for (slot, dir) in legacySlotDirs(state, folders: folders) {
+                if let slot { removeSlot(slot, dir: dir) } else { removeSlotDir(dir) }
+            }
+            try? FileManager.default.removeItem(atPath: Paths.legacyStatePath)
+            try? FileManager.default.removeItem(atPath: Paths.legacySlots)
+            Log.step("removed the slots of the old shared state.json; `simless up` in a worktree makes its slots again")
         }
     }
 
@@ -201,24 +227,22 @@ enum Cleanup {
         let limit = diskLimitGB(current)
         var total = sizeGB(Paths.cache)
         guard total > limit else { return }
-        _ = try? withLock("state") {
-            var state = GlobalState.load()
-            let work = "\(Paths.cache)/work"
-            let dirs = ((try? FileManager.default.contentsOfDirectory(atPath: work)) ?? []).map { "\(work)/\($0)" }
-                // Not one in use: another session may be testing there right now.
-                .filter { $0 != current.work && Date().timeIntervalSinceReferenceDate - lastUsed($0) > 3600 }
-                .sorted { lastUsed($0) < lastUsed($1) }
-            for dir in dirs where total > limit {
+        let work = "\(Paths.cache)/work"
+        let names = ((try? FileManager.default.contentsOfDirectory(atPath: work)) ?? [])
+            // Not one in use: another session may be testing there right now.
+            .filter { "\(work)/\($0)" != current.work && Date().timeIntervalSinceReferenceDate - lastUsed("\(work)/\($0)") > 3600 }
+            .sorted { lastUsed("\(work)/\($0)") < lastUsed("\(work)/\($1)") }
+        for name in names where total > limit {
+            let dir = "\(work)/\(name)"
+            _ = try? withLock(GlobalState.lockName(hash: String(name.prefix { $0 != "-" }))) {
                 let owner = (try? String(contentsOfFile: "\(dir)/worktree.txt", encoding: .utf8)) ?? dir
-                let slots = state.slots.filter { Paths.workDir(forWorktree: $0.worktree) == dir }
-                let freed = sizeGB(dir) + slots.reduce(0) { $0 + sizeGB("\(Paths.slots)/\($1.slotID)") }
-                for slot in slots { removeSlot(slot) }
-                state.slots.removeAll { s in slots.contains { $0.slotID == s.slotID } }
+                // The folder holds the worktree's slots too.
+                let freed = sizeGB(dir)
+                for slot in GlobalState.load(path: "\(dir)/state.json").slots { removeSlot(slot) }
                 try? FileManager.default.removeItem(atPath: dir)
                 total -= freed
                 Log.step(String(format: "disk: simless was over %.0f GB, freed %.1f GB of builds for %@ (used least recently)", limit, freed, owner))
             }
-            try state.save()
         }
         if total > limit {
             let freed = sizeGB("\(Paths.cache)/CompilationCache")
@@ -257,13 +281,13 @@ enum Cleanup {
     /// the agent and the files in your repos (SimlessKit, fixtures, config).
     static func clean(all: Bool) throws {
         if all {
-            let state = GlobalState.load()
-            for slot in state.slots { removeSlot(slot) }
+            let slots = GlobalState.all()
+            for slot in slots { removeSlot(slot) }
             removeCrashReports(olderThan: 0)
             // Every worktree simless built for (slot records and build-cache owner
             // markers), so generated project variants go too.
             let work = "\(Paths.cache)/work"
-            var worktrees = Set(state.slots.map(\.worktree))
+            var worktrees = Set(slots.map(\.worktree))
             for dir in (try? FileManager.default.contentsOfDirectory(atPath: work)) ?? [] {
                 if let owner = try? String(contentsOfFile: "\(work)/\(dir)/worktree.txt", encoding: .utf8) { worktrees.insert(owner) }
             }
@@ -279,7 +303,7 @@ enum Cleanup {
             let ws = try Workspace.load()
             let settings = try? ws.settings()
             // The render slot and its test and UI-test siblings.
-            for slot in GlobalState.load().slots where settings.map({ $0.bundleID == slot.bundleBase }) ?? false && slot.worktree == ws.root {
+            for slot in GlobalState.load(worktree: ws.root).slots where settings.map({ $0.bundleID == slot.bundleBase }) ?? false && slot.worktree == ws.root {
                 removeSlot(slot)
                 try GlobalState.release(slot)
             }

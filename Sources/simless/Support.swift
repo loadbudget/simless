@@ -27,9 +27,11 @@ enum Paths {
     /// Everything simless builds or caches. The agent only accepts patches from here.
     static let cache = "\(home)/Library/Caches/simless"
     static let support = "\(home)/Library/Application Support/Simless"
-    static let slots = "\(cache)/slots"
     static let locks = "\(cache)/locks"
-    static let statePath = "\(cache)/state.json"
+    /// Where every worktree's slots and their records were before each worktree
+    /// kept its own. Read only to remove them once (`Cleanup.migrateLegacyState`).
+    static let legacySlots = "\(cache)/slots"
+    static let legacyStatePath = "\(cache)/state.json"
     static let agentApp = "\(support)/SimlessAgent.app"
     static let agentSocket = "\(support)/agent.sock"
 
@@ -51,8 +53,20 @@ enum Paths {
         return url.path
     }()
 
-    static func workDir(forWorktree worktree: String) -> String {
+    /// A worktree's own folder: its builds, its slot records and its slots.
+    /// `cache` is the simless cache folder; tests pass a temporary one.
+    static func workDir(forWorktree worktree: String, cache: String = Paths.cache) -> String {
         "\(cache)/work/\(shortHash(worktree))-\((worktree as NSString).lastPathComponent)"
+    }
+
+    /// The records of a worktree's slots.
+    static func statePath(forWorktree worktree: String, cache: String = Paths.cache) -> String {
+        "\(workDir(forWorktree: worktree, cache: cache))/state.json"
+    }
+
+    /// The folders of a worktree's slots, one per slot.
+    static func slotsDir(forWorktree worktree: String) -> String {
+        "\(workDir(forWorktree: worktree))/slots"
     }
 }
 
@@ -274,7 +288,7 @@ func withToken<T>(_ name: String, count: Int, _ body: () throws -> T) throws -> 
     }
 }
 
-// MARK: - Global state (slot assignments), guarded by the "state" lock
+// MARK: - Slot records, one file per worktree, guarded by its "state-<hash>" lock
 
 struct SlotRecord: Codable {
     var bundleBase: String      // e.g. com.example.app
@@ -290,40 +304,61 @@ struct SlotRecord: Codable {
     var stale: [String]?        // fixtures that reach an edit the newest patch doesn't cover
     var kind: String?           // nil: the render host. "test": unit tests. "ui1"...: UI test app hosts
     var slotID: String { "\(bundleBase).simless\(n)\(kind.map { "-" + $0 } ?? "")" }
-    var dir: String { "\(Paths.slots)/\(slotID)" }
+    var dir: String { "\(Paths.slotsDir(forWorktree: worktree))/\(slotID)" }
 }
 
+/// The slots of one worktree, kept in `Paths.statePath(forWorktree:)`. The
+/// name is from when one file held every worktree's slots.
 struct GlobalState: Codable {
     var slots: [SlotRecord] = []
 
-    static func load() -> GlobalState {
-        guard let d = FileManager.default.contents(atPath: Paths.statePath),
+    /// The lock that guards a worktree's records. `hash` is `shortHash` of the
+    /// worktree path, which is also the start of its work folder's name.
+    static func lockName(forWorktree worktree: String) -> String { lockName(hash: shortHash(worktree)) }
+    static func lockName(hash: String) -> String { "state-\(hash)" }
+
+    /// The records in `path`; none when the file is missing or unreadable.
+    static func load(path: String) -> GlobalState {
+        guard let d = FileManager.default.contents(atPath: path),
               let s = try? JSONDecoder().decode(GlobalState.self, from: d) else { return GlobalState() }
         return s
     }
 
-    func save() throws {
-        try mkdirp(Paths.cache)
+    static func load(worktree: String, cache: String = Paths.cache) -> GlobalState {
+        load(path: Paths.statePath(forWorktree: worktree, cache: cache))
+    }
+
+    func save(worktree: String, cache: String = Paths.cache) throws {
+        try mkdirp(Paths.workDir(forWorktree: worktree, cache: cache))
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try enc.encode(self).write(to: URL(fileURLWithPath: Paths.statePath), options: .atomic)
+        try enc.encode(self).write(to: URL(fileURLWithPath: Paths.statePath(forWorktree: worktree, cache: cache)), options: .atomic)
+    }
+
+    /// Every worktree's slots, read without a lock, for reports and cleanup.
+    static func all(cache: String = Paths.cache) -> [SlotRecord] {
+        let work = "\(cache)/work"
+        return ((try? FileManager.default.contentsOfDirectory(atPath: work)) ?? [])
+            .flatMap { load(path: "\(work)/\($0)/state.json").slots }
     }
 
     /// Returns this worktree's slot, with the number of its path and a free port.
     /// A `kind` slot shares its render slot's number (app.simless<n>, app.simless<n>-test).
     static func slot(bundleBase: String, worktree: String, kind: String? = nil) throws -> SlotRecord {
-        try withLock("state") {
-            var s = load()
+        try withLock(lockName(forWorktree: worktree)) {
+            var s = load(worktree: worktree)
             // A stopped host's port may since have gone to another program.
             let keep = { (r: SlotRecord) in portIsFree(r.port) || RuntimeHost.hasProcess(r) }
-            let (r, replaced) = try s.assign(bundleBase: bundleBase, worktree: worktree, kind: kind, keep: keep) { usedPorts in
+            let others = all().filter { $0.worktree != worktree }
+            let (r, replaced) = try s.assign(bundleBase: bundleBase, worktree: worktree, kind: kind,
+                                             others: others, keep: keep) { usedPorts in
                 try freePort(avoiding: usedPorts)
             }
             for old in replaced {
                 Log.step("moving \(old.slotID) to \(r.slotID): slots are now numbered by worktree path")
                 Cleanup.removeSlot(old)
             }
-            try s.save()
+            try s.save(worktree: worktree)
             return r
         }
     }
@@ -331,8 +366,10 @@ struct GlobalState: Codable {
     /// The slot of `worktree`, added if it has none. A slot of that worktree
     /// under an older number comes back in `replaced`, for the caller to remove.
     /// Two worktrees whose paths hash to one number throw, because they would
-    /// share an app container. A slot whose port `keep` refuses gets a new one.
+    /// share an app container: `others` are the other worktrees' slots, which
+    /// live in their own files. A slot whose port `keep` refuses gets a new one.
     mutating func assign(bundleBase: String, worktree: String, kind: String?,
+                         others: [SlotRecord] = [],
                          keep: (SlotRecord) -> Bool = { _ in true },
                          port: (Set<Int>) throws -> Int) throws -> (SlotRecord, replaced: [SlotRecord]) {
         let n = slotNumber(forWorktree: worktree)
@@ -343,7 +380,7 @@ struct GlobalState: Codable {
             }
             return (slots[i], [])
         }
-        if let other = slots.first(where: { same($0) && $0.n == n }) {
+        if let other = slots.first(where: { same($0) && $0.n == n }) ?? others.first(where: { same($0) && $0.n == n }) {
             throw SimlessError("\(other.worktree) and \(worktree) both hash to slot \(other.slotID); move one of them")
         }
         let replaced = slots.filter { same($0) && $0.worktree == worktree }
@@ -355,19 +392,19 @@ struct GlobalState: Codable {
     }
 
     static func update(_ record: SlotRecord) throws {
-        try withLock("state") {
-            var s = load()
+        try withLock(lockName(forWorktree: record.worktree)) {
+            var s = load(worktree: record.worktree)
             s.slots.removeAll { $0.slotID == record.slotID }
             s.slots.append(record)
-            try s.save()
+            try s.save(worktree: record.worktree)
         }
     }
 
     static func release(_ record: SlotRecord) throws {
-        try withLock("state") {
-            var s = load()
+        try withLock(lockName(forWorktree: record.worktree)) {
+            var s = load(worktree: record.worktree)
             s.slots.removeAll { $0.slotID == record.slotID }
-            try s.save()
+            try s.save(worktree: record.worktree)
         }
     }
 }

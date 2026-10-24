@@ -377,7 +377,7 @@ What can't run here runs in a simulator: `simless test --simulator-only` prints 
 
 ## Many agents, one Mac
 
-Agents often work in parallel worktrees. Each worktree has its own hosts, slots and build folder, so runs never share state or pick each other's hosts. Test runs going on at the same time share the Mac's cores: a run that starts while another is going uses half of them (fewer hosts, fewer tests at once), with three runs a third, and so on, so nobody gets slowed into timeouts. `simless status` lists the runs going on and the share each gets.
+Agents often work in parallel worktrees. Each worktree has its own hosts, slots and build folder (its slot records and slots are in that folder too), so runs never share state or pick each other's hosts. Test runs going on at the same time share the Mac's cores: a run that starts while another is going uses half of them (fewer hosts, fewer tests at once), with three runs a third, and so on, so nobody gets slowed into timeouts. `simless status` lists the runs going on and the share each gets.
 
 simless also cleans up after itself, so nothing piles up between runs or after a worktree is gone. `simless status` shows what's running and what's on disk, by worktree, and `simless clean --all` removes everything simless created.
 

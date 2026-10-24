@@ -379,7 +379,7 @@ func skillNote() -> String? {
 
 func currentSlot(_ ws: Workspace) throws -> SlotRecord {
     let settings = try ws.settings()
-    let state = GlobalState.load()
+    let state = GlobalState.load(worktree: ws.root)
     guard let slot = state.slots.first(where: { $0.bundleBase == settings.bundleID && $0.worktree == ws.root && $0.kind == nil }) else {
         throw SimlessError("no host for this worktree; run `simless up`")
     }
@@ -691,9 +691,8 @@ func reloadDryRun(_ ws: Workspace, _ args: Args) throws {
 
 /// `simless status --json`, for a daemon that watches a build machine.
 func statusJSON() throws {
-    let state = GlobalState.load()
     var hosts: [[String: Any]] = []
-    for s in state.slots.sorted(by: { $0.port < $1.port }) {
+    for s in GlobalState.all().sorted(by: { $0.port < $1.port }) {
         var h: [String: Any] = ["slot": s.slotID, "port": s.port, "worktree": s.worktree,
                                 "role": s.kind.map { $0.hasPrefix("test") ? "unit-tests" : "ui-tests" } ?? "renders"]
         if let use = RuntimeHost.usage(s) {
@@ -712,8 +711,10 @@ func statusJSON() throws {
         let worktree = (try? String(contentsOfFile: "\(work)/\(dir)/worktree.txt", encoding: .utf8)) ?? dir
         return ["worktree": worktree, "gb": (Cleanup.sizeGB("\(work)/\(dir)") * 100).rounded() / 100]
     }
-    let cas = Cleanup.sizeGB("\(Paths.cache)/CompilationCache"), slots = Cleanup.sizeGB(Paths.slots)
-    let total = worktrees.reduce(0) { $0 + ($1["gb"] as? Double ?? 0) } + cas + slots
+    // A worktree's folder holds its slots, so `slots` is part of the worktrees' sizes.
+    let cas = Cleanup.sizeGB("\(Paths.cache)/CompilationCache")
+    let slots = ((try? FileManager.default.contentsOfDirectory(atPath: work)) ?? []).reduce(0) { $0 + Cleanup.sizeGB("\(work)/\($1)/slots") }
+    let total = worktrees.reduce(0) { $0 + ($1["gb"] as? Double ?? 0) } + cas
     let out: [String: Any] = [
         "simless": version, "hosts": hosts, "hostsUp": hosts.filter { $0["state"] as? String == "up" }.count, "testRuns": runs,
         "disk": ["path": Paths.cache, "totalGB": (total * 100).rounded() / 100, "limitGB": Cleanup.diskLimitGB(),
@@ -765,10 +766,10 @@ func cmdTest(_ args: Args) throws { try TestEngine.run(args) }
 
 func cmdStatus(_ args: Args) throws {
     if args.flags.contains("--json") { return try statusJSON() }
-    let state = GlobalState.load()
-    if state.slots.isEmpty { print("no hosts"); return }
+    let slotRecords = GlobalState.all()
+    if slotRecords.isEmpty { print("no hosts"); return }
     var totalMB = 0.0, running = 0
-    for s in state.slots.sorted(by: { $0.port < $1.port }) {
+    for s in slotRecords.sorted(by: { $0.port < $1.port }) {
         let role = s.kind.map { $0.hasPrefix("test") ? "unit tests" : "UI tests" } ?? "renders"
         if let use = RuntimeHost.usage(s) {
             totalMB += use.mb
@@ -802,16 +803,18 @@ func cmdStatus(_ args: Args) throws {
         let worktree = (try? String(contentsOfFile: "\(Paths.cache)/work/\(dir)/worktree.txt", encoding: .utf8)) ?? dir
         return (worktree, gb("\(Paths.cache)/work/\(dir)"))
     }
-    let cas = gb("\(Paths.cache)/CompilationCache"), slots = gb("\(Paths.cache)/slots")
-    let total = builds.reduce(0) { $0 + $1.1 } + cas + slots
+    // A worktree's folder holds its slots, so `slots` is part of the builds' sizes.
+    let cas = gb("\(Paths.cache)/CompilationCache")
+    let slots = ((try? FileManager.default.contentsOfDirectory(atPath: "\(Paths.cache)/work")) ?? []).reduce(0) { $0 + gb("\(Paths.cache)/work/\($1)/slots") }
+    let total = builds.reduce(0) { $0 + $1.1 } + cas
     print(String(format: "disk: %.1f GB in %@", total, Paths.cache))
     for (worktree, size) in builds.sorted(by: { $0.1 > $1.1 }) {
-        print(String(format: "  %.1f GB  builds and results for %@ (`simless clean` there frees it)", size, worktree))
+        print(String(format: "  %.1f GB  builds, slots and results for %@ (`simless clean` there frees it)", size, worktree))
     }
     print(String(format: "  %.1f GB  shared compilation cache (makes builds in new worktrees fast; cleared above %.0f GB)", cas, Cleanup.compileCacheLimitGB))
-    print(String(format: "  %.1f GB  installed slots, as du counts them (mostly APFS clones of the builds, so less on the disk)", slots))
+    print(String(format: "  (of the worktrees' figures, %.1f GB is installed slots, as du counts them: mostly APFS clones of the builds, so less on the disk)", slots))
     print("  `simless clean --all` frees everything")
-    let probe = state.slots.first { $0.kind == nil && $0.stats() != nil }
+    let probe = slotRecords.first { $0.kind == nil && $0.stats() != nil }
     print("live reload: \(Agent.liveStatus(probeSlot: probe).map { "off (\($0))" } ?? "on")")
 }
 
@@ -819,7 +822,7 @@ func cmdDown(_ args: Args) throws {
     var slots: [SlotRecord]
     let here = try? Workspace.load()
     if args.flags.contains("--all") {
-        slots = GlobalState.load().slots
+        slots = GlobalState.all()
         // Another session's test run keeps its hosts: stopping them would fail its tests.
         let busy = Set(Budget.running().map(\.worktree))
         for worktree in busy.sorted() where worktree != here?.root {
@@ -829,7 +832,7 @@ func cmdDown(_ args: Args) throws {
     } else {
         // This worktree's render host and its test and UI hosts.
         guard let here else { throw SimlessError("not in a simless worktree; `simless down --all` stops every worktree's hosts") }
-        slots = GlobalState.load().slots.filter { $0.worktree == here.root }
+        slots = GlobalState.load(worktree: here.root).slots
     }
     // Only stops: the next render/reload relaunches in ~1 s. `simless clean` (or the
     // automatic cleanup when a worktree is deleted) removes slots and caches.
@@ -859,7 +862,7 @@ func cmdAgent(_ args: Args) throws {
             It can only copy simless's patch dylibs into the temp folder of Simless render-host containers.
             """)
     default:
-        let probe = GlobalState.load().slots.first { $0.stats() != nil }
+        let probe = GlobalState.all().first { $0.stats() != nil }
         print("live reload: \(Agent.liveStatus(probeSlot: probe).map { "off (\($0))" } ?? "on")")
     }
 }
