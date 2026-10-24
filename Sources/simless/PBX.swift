@@ -5,7 +5,7 @@ import Foundation
 
 /// Just enough of a project.pbxproj to know what a target compiles: the
 /// synchronized folders (Xcode 16+) it lists, and the files of its Sources
-/// build phase.
+/// build phase, and the package products it links.
 /// A synchronized folder or a file can sit inside classic groups, and its `path`
 /// is then relative to its parent group, so paths are resolved through the group tree.
 enum PBX {
@@ -90,6 +90,46 @@ enum PBX {
             guard let ref = objects[buildFile].flatMap({ field("fileRef", $0.body) })?.split(separator: " ").first,
                   let file = objects[String(ref)] else { return nil }
             return (field("name", file.body) ?? file.path ?? String(ref), file.sourceTree ?? "", fullPath(String(ref)))
+        }
+    }
+
+    /// A Swift package product that a target links, and the package the
+    /// project file gives for it.
+    struct PackageProduct: Equatable {
+        enum Package: Equatable {
+            /// An XCLocalSwiftPackageReference: its `relativePath`, relative to the project's directory.
+            case local(String)
+            /// An XCRemoteSwiftPackageReference: its `repositoryURL`.
+            case remote(String)
+            /// No package named, as XcodeGen writes it: Xcode looks for the
+            /// product in the project's local packages.
+            case unnamed
+            /// A package reference of another kind, or one with no object: its isa or id.
+            case unknown(String)
+        }
+        let name: String
+        let package: Package
+    }
+
+    /// The package products in `target`'s `packageProductDependencies`, in the project file's order.
+    static func packageProducts(target: String, pbx: String) -> [PackageProduct] {
+        let objects = objects(pbx)
+        guard let t = nativeTarget(target, objects) else { return [] }
+        return list("packageProductDependencies", t.body).compactMap { id in
+            guard let dep = objects[id], let name = field("productName", dep.body) else { return nil }
+            // A package value reads `<id> /* <kind> "<name>" */`.
+            guard let ref = field("package", dep.body)?.split(separator: " ").first.map(String.init) else {
+                return PackageProduct(name: name, package: .unnamed)
+            }
+            let package = objects[ref]
+            switch package?.isa {
+            case "XCLocalSwiftPackageReference":
+                return PackageProduct(name: name, package: package.flatMap { field("relativePath", $0.body) }.map { .local($0) } ?? .unknown(ref))
+            case "XCRemoteSwiftPackageReference":
+                return PackageProduct(name: name, package: .remote(package.flatMap { field("repositoryURL", $0.body) } ?? ref))
+            default:
+                return PackageProduct(name: name, package: .unknown(package?.isa ?? ref))
+            }
         }
     }
 

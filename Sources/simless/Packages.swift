@@ -95,6 +95,66 @@ enum Packages {
     }
 }
 
+/// What a UI test bundle needs from a local package's manifest: the products
+/// it declares and the oldest macOS it builds for.
+struct PackageManifest: Codable, Equatable {
+    let name: String
+    let products: [String]
+    let macOS: String?          // the version of its `platforms` entry for macOS, if it has one
+}
+
+extension Packages {
+    /// The manifest of the package in `dir`, cached per Package.swift mtime.
+    static func manifest(dir: String, ws: Workspace) throws -> PackageManifest {
+        let file = "\(dir)/Package.swift"
+        guard exists(file) else { throw SimlessError("\(dir) has no Package.swift") }
+        let cache = "\(ws.work)/package-manifest-\(shortHash(dir))-\(Int(mtime(file))).json"
+        if let d = FileManager.default.contents(atPath: cache), let cached = try? JSONDecoder().decode(PackageManifest.self, from: d) {
+            return cached
+        }
+        let m = try manifest(json: dumpPackage(dir))
+        try? mkdirp(ws.work)
+        try? JSONEncoder().encode(m).write(to: URL(fileURLWithPath: cache))
+        return m
+    }
+
+    /// The manifest from `swift package dump-package` output.
+    static func manifest(json: String) throws -> PackageManifest {
+        guard let d = try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any],
+              let name = d["name"] as? String else { throw SimlessError("unexpected dump-package output") }
+        let products = ((d["products"] as? [[String: Any]]) ?? []).compactMap { $0["name"] as? String }
+        let macOS = ((d["platforms"] as? [[String: Any]]) ?? []).first { $0["platformName"] as? String == "macos" }?["version"] as? String
+        return PackageManifest(name: name, products: products, macOS: macOS)
+    }
+
+    /// Builds products of the local package in `dir` for the Mac (arm64), the
+    /// slice of a UI test bundle, with every target they depend on. Returns the
+    /// folder that holds their modules and a `lib<product>.a` for each, which
+    /// holds the product's targets and the targets they depend on.
+    ///
+    /// The Swift Build engine is named, since only it writes those archives:
+    /// SwiftPM's older native engine writes object files per target.
+    static func buildForMac(dir: String, products: [String], scratch: String, logs: String) throws -> String {
+        let base = ["swift", "build", "--package-path", dir, "--scratch-path", scratch, "--build-system", "swiftbuild",
+                    "--triple", "arm64-apple-macosx", "--configuration", "debug"]
+        for product in products {
+            let log = "\(logs)/package-\(product).log"
+            let r = try Shell.run(base + ["--product", product], cwd: dir, logPath: log)
+            guard r.code == 0 else {
+                let errors = Patch.compilerErrors(r.out)
+                throw SimlessError("building the package product \(product) for the Mac failed (log: \(log)):\n"
+                                   + (errors.isEmpty ? r.out.split(separator: "\n").suffix(15).joined(separator: "\n") : errors))
+            }
+        }
+        let bin = try Shell.check(base + ["--show-bin-path"], cwd: dir, what: "swift build --show-bin-path", stdoutOnly: true)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        for product in products where !exists("\(bin)/lib\(product).a") {
+            throw SimlessError("swift build made no lib\(product).a in \(bin), so the package product \(product) can't be linked")
+        }
+        return bin
+    }
+}
+
 /// A local package's test targets. The Mac can't run them on their own: Xcode
 /// drops hostless test bundles for "Designed for iPad", and `swift test` builds
 /// for macOS, where iOS-only imports fail. simless builds them for iOS devices
