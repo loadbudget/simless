@@ -105,9 +105,7 @@ enum Native {
         try signInsideOut(changed + [exe])
 
         let runtime = try RuntimeBuild.nativeDylib()
-        try? fm.removeItem(atPath: "\(slot.dir)/SimlessRuntime.dylib")
-        try fm.copyItem(atPath: runtime, toPath: "\(slot.dir)/SimlessRuntime.dylib")
-        try RuntimeHost.installModule(slot)
+        try RuntimeHost.installRuntime(slot, dylib: runtime)
         try settings.bundleID.write(toFile: "\(slot.dir)/original-id.txt", atomically: true, encoding: .utf8)
         try makeHome(slot)
         fm.createFile(atPath: marker(slot), contents: nil)

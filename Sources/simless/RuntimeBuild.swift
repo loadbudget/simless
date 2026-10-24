@@ -67,17 +67,28 @@ enum RuntimeBuild {
     /// `xcodebuild -version` and `swiftc --version`, read once per process.
     private static let toolVersions = Locked<(xcode: String, swiftc: String)?>(nil)
 
-    /// The runtime compiled for this simless, Xcode and Swift compiler, not yet signed.
-    static func compiled() throws -> String {
-        let sources = ((try? FileManager.default.contentsOfDirectory(atPath: "\(Paths.toolRoot)/Runtime")) ?? [])
+    /// The runtime's source files.
+    static func sources() -> [String] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: "\(Paths.toolRoot)/Runtime")) ?? [])
             .filter { $0.hasSuffix(".swift") || $0.hasSuffix(".c") || $0.hasSuffix(".m") }.sorted().map { "\(Paths.toolRoot)/Runtime/\($0)" }
+    }
+
+    /// The folder of the runtime build for this simless, Xcode, Swift compiler
+    /// and runtime sources, whether it is built yet or not.
+    static func currentDir() -> String {
         let (xcode, swiftc) = toolVersions.value ?? {
             let read = ((try? Shell.run(["xcodebuild", "-version"]).out) ?? "", (try? Shell.run(["xcrun", "swiftc", "--version"]).out) ?? "")
             toolVersions.mutate { $0 = read }
             return read
         }()
-        let stamp = stamp(version: version, xcode: xcode, swiftc: swiftc, sources: sources.map { ($0, "\(mtime($0))") })
-        let dir = "\(Paths.cache)/runtime/\(stamp)"
+        return "\(Paths.cache)/runtime/\(stamp(version: version, xcode: xcode, swiftc: swiftc, sources: sources().map { ($0, "\(mtime($0))") }))"
+    }
+
+    /// The runtime compiled for this simless, Xcode and Swift compiler, not yet signed.
+    static func compiled() throws -> String {
+        let sources = Self.sources()
+        let dir = currentDir()
+        let stamp = (dir as NSString).lastPathComponent
         let out = "\(dir)/SimlessRuntime.dylib"
         try ensureBuilt(dir) {
             let t = now()

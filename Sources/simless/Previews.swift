@@ -345,7 +345,8 @@ enum Previews {
             : input.sources.filter { $0.value.contains("#Preview") || $0.value.contains("PreviewProvider") || $0.value.contains("@main") }
         let m = try compileLeavingOut(input, alwaysBuild: !slot.kitInBuild) { gen, prelude in
             try Patch.compile(ws: ws, slot: slot, settings: settings, files: gen.texts.keys.sorted(), texts: gen.texts,
-                              name: "SimlessPreviews", dir: d, prelude: prelude, entry: "        simlessRegisterPreviews(r)")
+                              name: "SimlessPreviews", dir: d, prelude: prelude, entry: "        simlessRegisterPreviews(r)",
+                              forNewBuild: true)
         }
         try save(ws, m)
         if let failure = m.failure { throw SimlessError(failure) }

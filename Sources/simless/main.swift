@@ -655,10 +655,14 @@ func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws 
 /// Why `reload` must build the app again instead of patching it, if it must:
 /// the kit was edited, or added or deleted since the build the host runs. A
 /// patch binds to the registry of the installed build, so it can't cross a
-/// change of who serves renders.
-func fullBuildReason(ws: Workspace, slot: SlotRecord, files: [String]) -> String? {
+/// change of who serves renders. Without the kit, the registry is
+/// SimlessRuntime's, so a patch can't cross a change of the runtime either.
+/// `currentRuntime` is the current runtime build's folder.
+func fullBuildReason(ws: Workspace, slot: SlotRecord, files: [String],
+                     currentRuntime: () -> String = RuntimeBuild.currentDir) -> String? {
     if ws.kitInApp != slot.kitInBuild { return ws.kitInApp ? "SimlessKit added" : "SimlessKit deleted" }
     if files.contains("\(ws.root)/\(ws.config.kitFile)") { return "SimlessKit changed" }
+    if !slot.kitInBuild, RuntimeHost.injectedBuild(slot) != currentRuntime() { return "SimlessRuntime changed" }
     return nil
 }
 
