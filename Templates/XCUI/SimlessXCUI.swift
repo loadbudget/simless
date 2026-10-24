@@ -219,6 +219,8 @@ final class SimlessUIHost: @unchecked Sendable {
 
     private(set) var snapshot: [Node] = []
     private(set) var generation = 0
+    /// The app answered the last fetch of the tree.
+    private(set) var treeAnswered = false
     private var snapshotAt = Date.distantPast
     var dirty = true
 
@@ -228,8 +230,10 @@ final class SimlessUIHost: @unchecked Sendable {
             if let r = call(["cmd": "ui.snapshot"]), let nodes = r["nodes"] as? [[String: Any]] {
                 generation = r["generation"] as? Int ?? 0
                 snapshot = nodes.enumerated().map { Node($0.offset, $0.element) }
+                treeAnswered = true
             } else {
                 snapshot = []
+                treeAnswered = false
             }
             snapshotAt = Date()
             dirty = false
@@ -404,9 +408,12 @@ class XCUIElement: NSObject, @unchecked Sendable {
     }
 
     /// The node this element currently resolves to, if any.
-    func resolve() -> Node? {
+    func resolve() -> Node? { resolve(in: host.tree()) }
+
+    /// The node this element resolves to in this tree, if any.
+    func resolve(in tree: [Node]) -> Node? {
         guard let query else { return nil }
-        let matches = query.matches()
+        let matches = query.evaluate(in: tree)
         guard let position else { return matches.first }
         return position < matches.count ? matches[position] : nil
     }
@@ -468,6 +475,20 @@ class XCUIElement: NSObject, @unchecked Sendable {
             host.dirty = true
         } while Date() < deadline
         return resolve() == nil
+    }
+
+    /// Waits until the attribute at `keyPath` equals `expectedValue`, reading
+    /// it again from a fresh tree every 50 ms, as `waitForExistence` does.
+    /// False when the timeout ends first.
+    @MainActor @preconcurrency
+    func wait<V: Equatable>(for keyPath: KeyPath<XCUIElement, V>, toEqual expectedValue: V, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout * host.timeScale)
+        repeat {
+            if self[keyPath: keyPath] == expectedValue { return true }
+            Thread.sleep(forTimeInterval: 0.05)
+            host.dirty = true
+        } while Date() < deadline
+        return self[keyPath: keyPath] == expectedValue
     }
 
     // MARK: Actions
@@ -867,6 +888,125 @@ final class Snapshot: NSObject {
     @objc var frame: CGRect { node.frame }
 }
 
+// MARK: - Element snapshots
+
+typealias XCUIElementAttributeName = XCUIElement.AttributeName
+
+extension XCUIElement {
+    /// The keys of a snapshot's `dictionaryRepresentation`, with XCTest's raw values.
+    struct AttributeName: Hashable, RawRepresentable, Sendable {
+        let rawValue: String
+        init(rawValue: String) { self.rawValue = rawValue }
+        static let children = AttributeName(rawValue: "children")
+        static let elementType = AttributeName(rawValue: "elementType")
+        static let identifier = AttributeName(rawValue: "identifier")
+        static let value = AttributeName(rawValue: "value")
+        static let placeholderValue = AttributeName(rawValue: "placeholderValue")
+        static let title = AttributeName(rawValue: "title")
+        static let label = AttributeName(rawValue: "label")
+        static let frame = AttributeName(rawValue: "frame")
+        static let enabled = AttributeName(rawValue: "enabled")
+        static let selected = AttributeName(rawValue: "selected")
+        static let hasFocus = AttributeName(rawValue: "hasFocus")
+        static let horizontalSizeClass = AttributeName(rawValue: "horizontalSizeClass")
+        static let verticalSizeClass = AttributeName(rawValue: "verticalSizeClass")
+    }
+}
+
+@MainActor protocol XCUIElementAttributes {
+    var identifier: String { get }
+    var frame: CGRect { get }
+    var value: Any? { get }
+    var title: String { get }
+    var label: String { get }
+    var elementType: XCUIElement.ElementType { get }
+    var isEnabled: Bool { get }
+    var horizontalSizeClass: XCUIElement.SizeClass { get }
+    var verticalSizeClass: XCUIElement.SizeClass { get }
+    var placeholderValue: String? { get }
+    var isSelected: Bool { get }
+    var hasFocus: Bool { get }
+}
+
+@MainActor protocol XCUIElementSnapshot: XCUIElementAttributes {
+    var children: [any XCUIElementSnapshot] { get }
+    var dictionaryRepresentation: [XCUIElement.AttributeName: Any] { get }
+}
+
+@MainActor protocol XCUIElementSnapshotProviding: NSObjectProtocol {
+    func snapshot() throws -> any XCUIElementSnapshot
+}
+
+extension XCUIElement: XCUIElementAttributes {}
+
+extension XCUIElement: XCUIElementSnapshotProviding {
+    /// The element and everything below it, from one read of the tree: the
+    /// values stay as they were at that read.
+    @MainActor
+    func snapshot() throws -> any XCUIElementSnapshot {
+        let tree = host.tree(fresh: true)
+        guard host.treeAnswered else { throw SnapshotError(description: "No snapshot: the app isn't running, or it didn't answer") }
+        guard let node = resolve(in: tree) else {
+            throw SnapshotError(description: "No snapshot: no element matches \(query.map { "\($0)" } ?? "the query")\(position.map { " at index \($0)" } ?? "")")
+        }
+        let byParent = Dictionary(grouping: tree, by: \.parent)
+        let sizeClass = horizontalSizeClass
+        func build(_ n: Node) -> ElementSnapshot {
+            ElementSnapshot(node: n, children: (byParent[n.index] ?? []).map(build),
+                            horizontalSizeClass: sizeClass, verticalSizeClass: verticalSizeClass)
+        }
+        return build(node)
+    }
+
+    struct SnapshotError: Error, CustomStringConvertible {
+        let description: String
+    }
+}
+
+/// One node of a snapshot and the nodes below it.
+@MainActor final class ElementSnapshot: XCUIElementSnapshot {
+    let node: Node
+    let children: [any XCUIElementSnapshot]
+    let horizontalSizeClass: XCUIElement.SizeClass
+    let verticalSizeClass: XCUIElement.SizeClass
+
+    init(node: Node, children: [ElementSnapshot], horizontalSizeClass: XCUIElement.SizeClass, verticalSizeClass: XCUIElement.SizeClass) {
+        self.node = node
+        self.children = children
+        self.horizontalSizeClass = horizontalSizeClass
+        self.verticalSizeClass = verticalSizeClass
+    }
+
+    var identifier: String { node.identifier }
+    var frame: CGRect { node.frame }
+    var value: Any? { node.value }
+    var title: String { node.title }
+    var label: String { node.label }
+    var elementType: XCUIElement.ElementType { node.type }
+    var isEnabled: Bool { node.enabled }
+    var placeholderValue: String? { node.placeholder }
+    var isSelected: Bool { node.selected }
+    var hasFocus: Bool { node.focused }
+
+    /// XCTest's form: the frame as `CGRect.dictionaryRepresentation`, numbers
+    /// as NSNumbers, and no key for a value the element doesn't have.
+    var dictionaryRepresentation: [XCUIElement.AttributeName: Any] {
+        var d: [XCUIElement.AttributeName: Any] = [
+            .identifier: identifier, .title: title, .label: label,
+            .frame: frame.dictionaryRepresentation,
+            .elementType: NSNumber(value: elementType.rawValue),
+            .enabled: NSNumber(value: isEnabled), .selected: NSNumber(value: isSelected),
+            .hasFocus: NSNumber(value: hasFocus),
+            .horizontalSizeClass: NSNumber(value: horizontalSizeClass.rawValue),
+            .verticalSizeClass: NSNumber(value: verticalSizeClass.rawValue),
+            .children: children.map { $0.dictionaryRepresentation },
+        ]
+        if let value { d[.value] = value }
+        if let placeholderValue { d[.placeholderValue] = placeholderValue }
+        return d
+    }
+}
+
 // MARK: - Application
 
 final class XCUIApplication: XCUIElement {
@@ -889,6 +1029,8 @@ final class XCUIApplication: XCUIElement {
     }
 
     private var isOther: Bool { bundleIdentifier != nil }
+
+    override func resolve(in tree: [Node]) -> Node? { resolve() }
 
     override func resolve() -> Node? {
         // The application itself: a node standing for the whole window.
