@@ -901,6 +901,8 @@ do {
     case "down": try cmdDown(args)
     case "agent": try cmdAgent(args)
     case "clean":
+        // `--worktree` with no path must not fall back to the current worktree.
+        if args.flags.contains("--worktree") || args.values["--worktree"] == "" { throw SimlessError("--worktree needs a path") }
         if let worktree = args.values["--worktree"] { try Cleanup.clean(worktree: worktree) } else { try Cleanup.clean(all: args.flags.contains("--all")) }
     case "calibrate":
         let ws = try Workspace.load()

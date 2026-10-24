@@ -317,11 +317,17 @@ enum Cleanup {
     /// cache, found by its path, so it works after the worktree is removed.
     static func clean(worktree path: String) throws {
         let root = canonicalPath(path)
+        // A path spelled unlike the worktree's own root has no folder: say so,
+        // rather than report a cleanup that left its hosts running.
+        guard exists(Paths.workDir(forWorktree: root)) else {
+            throw SimlessError("simless has nothing for \(root); pass the folder that holds \(Workspace.configName)")
+        }
         try withLock(GlobalState.lockName(forWorktree: root)) {
             for slot in GlobalState.load(worktree: root).slots { removeSlot(slot) }
             try? FileManager.default.removeItem(atPath: Paths.workDir(forWorktree: root))
         }
-        if exists("\(root)/\(Workspace.configName)"), let ws = try? Workspace.load(at: root) { removeGenerated(ws: ws) }
+        // A config that doesn't load throws, so generated files don't stay unreported.
+        if exists("\(root)/\(Workspace.configName)") { removeGenerated(ws: try Workspace.load(at: root)) }
         print("removed the hosts, slots and build cache of \(root)")
     }
 }
