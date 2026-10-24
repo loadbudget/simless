@@ -17,9 +17,9 @@ simless status        # fails with "no .simless.json" if the repo isn't set up
 
 If it isn't set up, do it yourself:
 
-1. Run `simless init` at the repo root. It writes `.simless.json` and `<App>/Simless/SimlessKit.swift` (generated, never edit), creates `SimlessFixtures.swift`, and adds the hook to the `@main` App's `init()`. Check the hook compiles. If the project doesn't use synchronized folders, add both Simless files to the app target.
-2. If app startup has side effects that a background render host shouldn't trigger (analytics, sync, network), guard them: `if !SimlessHost.isActive { ... }`, inside `#if SIMLESS`.
-3. Register fixtures (below), then run `simless up`. The first build takes a few minutes; later ones are incremental.
+1. Run `simless init` at the repo root. It writes `.simless.json`, the only file simless needs. Add no simless code to the app. In a repo that an older simless set up, it also removes `SimlessKit.swift` and the `SimlessHost.startIfRequested()` call in the App's `init()`, and prints what it removed. When it says it left a call, remove that call by hand.
+2. If app startup has side effects that a background render host shouldn't trigger (analytics, sync, network), guard them: `if !ProcessInfo.processInfo.arguments.contains("--simless-port") { ... }`, inside `#if SIMLESS`.
+3. Run `simless up`. The first build takes a few minutes; later ones are incremental. Add fixtures (below) for the states the previews don't show.
 
 `simless init` needs an Xcode project (not a workspace). A unit-test target is optional. simless needs no certificate, profile or other setup: if `simless up` asks for one, the project is in the `dfi` mode (`"mode": "dfi"` in `.simless.json`), so tell the user instead of improvising.
 
@@ -27,10 +27,9 @@ If it isn't set up, do it yourself:
 
 Some exist without any code: `root` (the app's first window, as the `@main` App builds it) and one per `#Preview` block, named `<File>.<preview name or number>`. `simless up` lists them. Render those first. Add fixtures for states the previews don't show.
 
-`SimlessFixtures.swift` is normal app code:
+Put them in `<App>/Simless/SimlessFixtures.swift` (or the folder `kitDir` in `.simless.json` names). simless compiles that file into the code it loads into the host, and leaves it out of the app build, so don't add it to a target:
 
 ```swift
-#if SIMLESS
 import SwiftUI
 
 @MainActor
@@ -40,7 +39,6 @@ func simlessFixtures(_ r: SimlessRegistry) {
     r.add("NoteList.empty") { NoteListView(notes: []) }
     r.add("NoteList.long") { NoteListView(notes: .fixture(count: 50, longTitles: true)) }
 }
-#endif
 ```
 
 - **One fixture per meaningful state:** normal, empty, loading, error, long content.
@@ -92,7 +90,7 @@ NoteList.empty · light · iphone 402×874 · 31 ms · patch 2
 - **Look at a `--png`** when the change is visual: colors, images, clipping. Read the image file.
 - **Too much noise from a check?** If the user agrees the design is intended (for example small chips that Apple's accessibility audit accepts), set `checks.minTapTarget` or add the issue text to `checks.ignore` in `.simless.json`. Don't do that just to get a clean result.
 
-**Interacting:** `simless act <Fixture> <steps>` renders the fixture, runs the steps in order and prints the tree afterwards. Steps: `tap "<label or #id>"`, `type "<#id or label>" "<text>"` (focuses the field first), `swipe up|down|left|right [on "<label>"]`, `longpress "<label>"`, `wait <ms>`. Prefer `#id`s, they don't change with copy. Each step is checked (`✓`/`✗`), and a step that finds nothing lists what's on screen. A control inside an element that reads as one (a button in a card that is itself a button) is listed under the tree as `inside "<card>": button "<label>"`, and `tap` reaches it by its own label or `#id`. Use it to check what a tap or typing does (a toggle's value, a validation message, a button enabling) instead of adding a fixture per state. Needs the kit from `simless init` (kit 5).
+**Interacting:** `simless act <Fixture> <steps>` renders the fixture, runs the steps in order and prints the tree afterwards. Steps: `tap "<label or #id>"`, `type "<#id or label>" "<text>"` (focuses the field first), `swipe up|down|left|right [on "<label>"]`, `longpress "<label>"`, `wait <ms>`. Prefer `#id`s, they don't change with copy. Each step is checked (`✓`/`✗`), and a step that finds nothing lists what's on screen. A control inside an element that reads as one (a button in a card that is itself a button) is listed under the tree as `inside "<card>": button "<label>"`, and `tap` reaches it by its own label or `#id`. Use it to check what a tap or typing does (a toggle's value, a validation message, a button enabling) instead of adding a fixture per state. An app that still has `SimlessKit.swift` needs kit 5 or later for it.
 
 `simless reload` hot-patches only the edited files plus the fixtures file. If a patch can't express a change (stored properties, function signatures, new types used elsewhere), it falls back to a full build automatically. Compiler errors point at your real `file:line`: fix them and re-run. `simless reload` with no arguments picks up every file edited since the last `simless up`.
 

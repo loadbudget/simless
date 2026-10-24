@@ -65,7 +65,7 @@ enum Act {
         let ws = try Workspace.load()
         let slot = try runningSlot(ws)
         if (slot.stats()?["kit"] as? Int ?? 1) < actKit {
-            throw SimlessError("`simless act` needs a newer \(ws.config.kitFile); run `simless init`, then `simless up`")
+            throw olderServer("`simless act`", ws: ws, slot: slot)
         }
         var options = Render.Options(dark: args.flags.contains("--dark"), device: args.values["--device"] ?? ws.config.device,
                                      json: args.flags.contains("--json"))
