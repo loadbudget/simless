@@ -3,6 +3,10 @@
 <!-- One section per version: `## 0.1.0 (2026-10-09)`. Notes for the next
      release go under `## Unreleased`. -->
 
+## Unreleased
+
+- **Previews that still don't compile after five rounds are reported.** Before, `simless up` saved a manifest with no dylib and counted every preview not left out as generated, so no preview fixture loaded and nothing said why. Now `up` prints `note: fixtures from #Preview blocks weren't built: previews still don't compile after 5 rounds (…); <first error>`, the summary counts 0 generated, and `previews.json` keeps the reason for each preview left out.
+
 ## 0.7.2 (2026-10-23)
 
 Fixes from running simless as the screen checker on customer apps in our pipeline: Form and List screens no longer crash the host under the phone idiom, `act` taps a button inside a card, and a List that loads after the first frame is read. All of it is in SimlessRuntime and the CLI, so no `simless init`.
