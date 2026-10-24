@@ -234,13 +234,19 @@ enum UITestEngine {
 
     /// The products in `target`'s `packageProductDependencies`, each with the
     /// local package that declares it: the package the project file names, or
-    /// when it names none, the one of `localPackages` (absolute directories)
-    /// whose manifest declares the product. A product of a remote package, of a
+    /// when it names none, the one package whose manifest declares the product
+    /// among `localPackages` (absolute directories) and the packages they use
+    /// by `.package(path:)`, at any depth. A product of a remote package, of a
     /// package reference simless can't read, or that no package or two
     /// packages declare, stops the build with an error that names it and the target.
     static func linkedProducts(target: String, pbx: String, projectDir: String, localPackages: [String],
                                manifest: (String) throws -> PackageManifest) throws -> [LinkedProduct] {
         try PBX.packageProducts(target: target, pbx: pbx).map { p in
+            func read(_ dir: String) throws -> PackageManifest {
+                do { return try manifest(dir) } catch {
+                    throw SimlessError("\(target) links the package product \(p.name), and simless can't read the package in \(dir): \(error)")
+                }
+            }
             let candidates: [String]
             switch p.package {
             case .remote(let url):
@@ -251,13 +257,10 @@ enum UITestEngine {
             case .local(let path):
                 candidates = [standardized(absolute(path, in: projectDir))]
             case .unnamed:
-                candidates = localPackages.map(standardized)
+                candidates = try withLocalDependencies(localPackages.map(standardized), manifest: read)
             }
             let declaring = try candidates.compactMap { dir -> (String, PackageManifest)? in
-                let m: PackageManifest
-                do { m = try manifest(dir) } catch {
-                    throw SimlessError("\(target) links the package product \(p.name), and simless can't read the package in \(dir): \(error)")
-                }
+                let m = try read(dir)
                 return m.products.contains(p.name) ? (dir, m) : nil
             }
             guard declaring.count == 1, let (dir, m) = declaring.first else {
@@ -268,6 +271,25 @@ enum UITestEngine {
             }
             return LinkedProduct(name: p.name, packageDir: dir, manifest: m)
         }
+    }
+
+    /// `packages` (standardized directories), then the packages they use by
+    /// `.package(path:)`, at any depth, each once.
+    static func withLocalDependencies(_ packages: [String], manifest: (String) throws -> PackageManifest) throws -> [String] {
+        var out: [String] = []
+        var queue = packages
+        while !queue.isEmpty {
+            let dir = queue.removeFirst()
+            guard !out.contains(dir) else { continue }
+            out.append(dir)
+            queue += try manifest(dir).localDependencies.map(standardized)
+        }
+        return out
+    }
+
+    /// The remote dependencies of the package in `dir` and of the local packages it uses, at any depth.
+    static func remoteDependencies(of dir: String, manifest: (String) throws -> PackageManifest) throws -> [String] {
+        try Array(Set(withLocalDependencies([standardized(dir)], manifest: manifest).flatMap { try manifest($0).remoteDependencies })).sorted()
     }
 
     /// The macOS a UI test bundle is built for: 14.0, or the newest macOS
@@ -284,9 +306,35 @@ enum UITestEngine {
     }
 
     /// The compiler arguments that give the bundle the modules and archives
-    /// of the products, from the folder each package was built into.
-    static func packageArguments(_ built: [(bin: String, products: [String])]) -> [String] {
-        built.flatMap { b in ["-I", b.bin] + b.products.map { "\(b.bin)/lib\($0).a" } }
+    /// of the products, from the folder each package was built into, and the
+    /// module maps of the C targets they use, which a Swift module that
+    /// imports one needs too.
+    static func packageArguments(_ built: [MacProducts]) -> [String] {
+        built.flatMap { b in
+            ["-I", b.bin] + b.moduleMaps.flatMap { ["-Xcc", "-fmodule-map-file=\($0)"] } + b.products.map { "\(b.bin)/lib\($0).a" }
+        }
+    }
+
+    /// What the bundle's build depends on: each file with its content, each
+    /// linked package with the time of its newest file and its products, the
+    /// macOS it is built for, and this simless.
+    static func bundleKey(files: [String], digest: (String) -> String?, packages: [(dir: String, newest: Double, products: [String])],
+                          macOS: String, simless: Double) -> String {
+        shortHash((files.sorted().map { "\($0) \(digest($0) ?? "")" }
+                   + packages.map { "\($0.dir) \($0.newest) \($0.products.joined(separator: ","))" }
+                   + ["macOS \(macOS)", "\(simless)"]).joined(separator: "\n"))
+    }
+
+    /// The swiftc command that builds the bundle's executable.
+    static func bundleCommand(module: String, macOS: String, sdk: String, swiftVersion: String, platform p: String, output: String,
+                              packages: [MacProducts], sources: [String]) -> [String] {
+        ["xcrun", "swiftc", "-D", PlatformConditions.trueFlag, "-emit-library", "-Onone", "-g", "-module-name", module,
+         "-target", "arm64-apple-macos\(macOS)", "-sdk", sdk, "-swift-version", swiftVersion,
+         "-F", "\(p)/Library/Frameworks", "-I", "\(p)/usr/lib", "-L", "\(p)/usr/lib",
+         "-framework", "XCTest", "-Xlinker", "-bundle",
+         "-Xlinker", "-rpath", "-Xlinker", "\(p)/Library/Frameworks",
+         "-Xlinker", "-rpath", "-Xlinker", "\(p)/usr/lib",
+         "-o", output] + packageArguments(packages) + sources
     }
 
     // MARK: - Build
@@ -300,17 +348,17 @@ enum UITestEngine {
         let shim = ((try? FileManager.default.contentsOfDirectory(atPath: "\(Paths.toolRoot)/Templates/XCUI")) ?? [])
             .filter { $0.hasSuffix(".swift") }.map { "\(Paths.toolRoot)/Templates/XCUI/\($0)" }
         let pbx = (try? String(contentsOfFile: "\(ws.root)/\(ws.config.project)/project.pbxproj", encoding: .utf8)) ?? ""
+        let manifest = { (dir: String) in try Packages.manifest(dir: dir, ws: ws) }
         let linked = try linkedProducts(target: target.name, pbx: pbx, projectDir: ws.projectDir,
-                                        localPackages: Workspace.localPackages(root: ws.root, project: ws.config.project).map { "\(ws.root)/\($0)" },
-                                        manifest: { try Packages.manifest(dir: $0, ws: ws) })
+                                        localPackages: ws.packages.map { "\(ws.root)/\($0)" }, manifest: manifest)
         let packages = productsByPackage(linked)
         let macOS = macOSVersion(packages: linked.map(\.manifest.macOS))
         // Built from exactly these files with exactly this content (a deleted
         // file or one put back to an older version counts too), by this simless,
         // and from the linked packages as of their newest file.
-        let key = shortHash(((target.sources + shim).sorted().map { "\($0) \(Workspace.digest($0) ?? "")" }
-                             + packages.map { "\($0.dir) \(Packages.newestSource($0.dir)) \($0.products.joined(separator: ","))" }
-                             + ["macOS \(macOS)", "\(mtime(Bundle.main.executablePath ?? ""))"]).joined(separator: "\n"))
+        let key = bundleKey(files: target.sources + shim, digest: Workspace.digest,
+                            packages: packages.map { ($0.dir, Packages.newestSource($0.dir), $0.products) },
+                            macOS: macOS, simless: mtime(Bundle.main.executablePath ?? ""))
         let keyFile = "\(bundle)/Contents/simless-sources"
         if exists(exe), (try? String(contentsOfFile: keyFile, encoding: .utf8)) == key { return bundle }
         try? FileManager.default.removeItem(atPath: keyFile)
@@ -335,23 +383,18 @@ enum UITestEngine {
                 .write(toFile: copy, atomically: true, encoding: .utf8)
             sources.append(copy)
         }
-        var built: [(bin: String, products: [String])] = []
+        var built: [MacProducts] = []
         for p in packages {
             Log.step("building \(p.products.joined(separator: ", ")) for the Mac, which \(target.name) links")
             do {
-                built.append((try Packages.buildForMac(dir: p.dir, products: p.products, scratch: "\(dir)/packages/\(shortHash(p.dir))", logs: dir),
-                              p.products))
+                built.append(try Packages.buildForMac(dir: p.dir, products: p.products, remote: remoteDependencies(of: p.dir, manifest: manifest),
+                                                      scratch: "\(dir)/packages/\(shortHash(p.dir))", logs: dir))
             } catch {
                 throw SimlessError("\(target.name): \(error)")
             }
         }
-        let r = try Shell.run(["xcrun", "swiftc", "-D", PlatformConditions.trueFlag, "-emit-library", "-Onone", "-g", "-module-name", TestEngine.moduleName(target.name),
-                               "-target", "arm64-apple-macos\(macOS)", "-sdk", sdk, "-swift-version", settings.swiftVersion,
-                               "-F", "\(p)/Library/Frameworks", "-I", "\(p)/usr/lib", "-L", "\(p)/usr/lib",
-                               "-framework", "XCTest", "-Xlinker", "-bundle",
-                               "-Xlinker", "-rpath", "-Xlinker", "\(p)/Library/Frameworks",
-                               "-Xlinker", "-rpath", "-Xlinker", "\(p)/usr/lib",
-                               "-o", exe] + packageArguments(built) + sources + shim, cwd: ws.root, logPath: log)
+        let r = try Shell.run(bundleCommand(module: TestEngine.moduleName(target.name), macOS: macOS, sdk: sdk, swiftVersion: settings.swiftVersion,
+                                            platform: p, output: exe, packages: built, sources: sources + shim), cwd: ws.root, logPath: log)
         guard r.code == 0 else {
             throw SimlessError("building \(target.name) for simless failed (log: \(log)):\n" + Patch.compilerErrors(r.out))
         }

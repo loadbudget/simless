@@ -115,8 +115,10 @@ enum PBX {
     static func packageProducts(target: String, pbx: String) -> [PackageProduct] {
         let objects = objects(pbx)
         guard let t = nativeTarget(target, objects) else { return [] }
-        return list("packageProductDependencies", t.body).compactMap { id in
-            guard let dep = objects[id], let name = field("productName", dep.body) else { return nil }
+        return list("packageProductDependencies", t.body).map { id in
+            // An entry with no object, or no product name, is named by its id.
+            guard let dep = objects[id] else { return PackageProduct(name: id, package: .unknown("no object \(id)")) }
+            guard let name = field("productName", dep.body) else { return PackageProduct(name: id, package: .unknown("no productName in \(id)")) }
             // A package value reads `<id> /* <kind> "<name>" */`.
             guard let ref = field("package", dep.body)?.split(separator: " ").first.map(String.init) else {
                 return PackageProduct(name: name, package: .unnamed)
