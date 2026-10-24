@@ -22,7 +22,8 @@ final class XCUITemplateTests: XCTestCase {
     }
 
     /// The calls of an iOS UI test: wait(for:toEqual:timeout:) from a test and
-    /// from a closure, and snapshot() of the app and of one element.
+    /// from a closure, snapshot() of the app and of one element, and a
+    /// screenshot of XCUIScreen.main.
     static let probe = """
         import XCTest
 
@@ -74,6 +75,15 @@ final class XCUITemplateTests: XCTestCase {
                 XCTAssertEqual(screen.children.first?.label, "Loading")
                 XCTAssertThrowsError(try app.buttons["missing"].snapshot())
             }
+
+            @MainActor
+            func testTheScreenShowsTheApp() {
+                XCTAssertEqual(XCUIScreen.screens, [XCUIScreen.main])
+                let shot = XCUIScreen.main.screenshot()
+                XCTAssertEqual(shot.pngRepresentation, Data(base64Encoded: "\(FakeHost.png)"))
+                XCTAssertEqual(shot.image.size, CGSize(width: 1, height: 1))
+                XCTAssertEqual(XCUIApplication().screenshot().pngRepresentation, shot.pngRepresentation)
+            }
         }
         """
 
@@ -81,11 +91,12 @@ final class XCUITemplateTests: XCTestCase {
         let host = try FakeHost()
         defer { host.stop() }
         let bundle = try build(source: Self.probe)
-        for test in ["testWaitSeesTheLabelChange", "testWaitEndsAtTheTimeout", "testSnapshotHoldsTheTree"] {
+        for test in ["testWaitSeesTheLabelChange", "testWaitEndsAtTheTimeout", "testSnapshotHoldsTheTree", "testTheScreenShowsTheApp"] {
             host.reset()
             let r = try Shell.run(["xcrun", "xctest", "-XCTest", "ProbeUITests/\(test)", bundle],
                                   env: ["SIMLESS_UI_PORT": String(host.port), "SIMLESS_UI_SLOT": "simless.tests.none"])
             XCTAssertEqual(r.code, 0, "\(test):\n\(r.out)")
+            XCTAssertTrue(r.out.contains("Executed 1 test"), "\(test) did not run:\n\(r.out)")
         }
     }
 
@@ -193,8 +204,9 @@ final class XCUITemplateTests: XCTestCase {
 
 /// Answers the bundle's requests as SimlessRuntime does, one JSON line each,
 /// with a fixed tree: the title reads "Loading" for its first 10 snapshots,
-/// then "Ready".
+/// then "Ready". A screenshot is a 1 by 1 PNG.
 private final class FakeHost: @unchecked Sendable {
+    static let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="
     let port: Int
     private let fd: Int32
     private let snapshots = Locked(0)
@@ -257,6 +269,7 @@ private final class FakeHost: @unchecked Sendable {
     }
 
     private func answer(_ request: [String: Any]) -> [String: Any] {
+        if request["cmd"] as? String == "ui.screenshot" { return ["png": Self.png] }
         guard request["cmd"] as? String == "ui.snapshot" else { return ["ok": true] }
         var count = 0
         snapshots.mutate { $0 += 1; count = $0 }

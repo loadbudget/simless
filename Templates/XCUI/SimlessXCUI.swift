@@ -365,10 +365,35 @@ struct XCUIKeyboardKey: RawRepresentable, Sendable {
 
 // MARK: - Screenshots
 
+/// A captured screenshot. Apple declares `image` as a `UIImage` on iOS; this
+/// bundle builds for macOS, where UIKit is absent, so `image` is the `NSImage`
+/// that Apple declares for macOS.
+@MainActor
 final class XCUIScreenshot: NSObject, @unchecked Sendable {
-    let pngRepresentation: Data
-    init(png: Data) { pngRepresentation = png }
+    nonisolated let pngRepresentation: Data
+    nonisolated init(png: Data) { pngRepresentation = png }
     var image: NSImage { NSImage(data: pngRepresentation) ?? NSImage() }
+
+    /// Asks the app for a picture of its window, or of `rect` in it.
+    nonisolated static func capture(rect: CGRect? = nil) -> XCUIScreenshot {
+        var request: [String: Any] = ["cmd": "ui.screenshot"]
+        if let rect { request["rect"] = [rect.minX, rect.minY, rect.width, rect.height] }
+        let r = SimlessUIHost.shared.call(request)
+        return XCUIScreenshot(png: (r?["png"] as? String).flatMap { Data(base64Encoded: $0) } ?? Data())
+    }
+}
+
+/// The screen of the device. The app's window is the whole screen of the
+/// stand-in device, so `main` is the only screen, and its screenshot is the
+/// same picture as `XCUIApplication().screenshot()`.
+@MainActor
+final class XCUIScreen: NSObject, @unchecked Sendable {
+    private override init() {}
+
+    static let main = XCUIScreen()
+    static var screens: [XCUIScreen] { [main] }
+
+    func screenshot() -> XCUIScreenshot { XCUIScreenshot.capture() }
 }
 
 extension XCTAttachment {
@@ -593,9 +618,7 @@ class XCUIElement: NSObject, @unchecked Sendable {
     }
 
     func screenshot() -> XCUIScreenshot {
-        let n = resolve()
-        let r = host.call(["cmd": "ui.screenshot", "rect": n.map { [$0.frame.minX, $0.frame.minY, $0.frame.width, $0.frame.height] } as Any])
-        return XCUIScreenshot(png: (r?["png"] as? String).flatMap { Data(base64Encoded: $0) } ?? Data())
+        XCUIScreenshot.capture(rect: resolve()?.frame)
     }
 
     // MARK: Queries
@@ -1096,10 +1119,7 @@ final class XCUIApplication: XCUIElement {
             + tree.map { XCUIElementQuery.describe($0, in: tree) }.joined(separator: "\n")
     }
 
-    override func screenshot() -> XCUIScreenshot {
-        let r = host.call(["cmd": "ui.screenshot"])
-        return XCUIScreenshot(png: (r?["png"] as? String).flatMap { Data(base64Encoded: $0) } ?? Data())
-    }
+    override func screenshot() -> XCUIScreenshot { XCUIScreenshot.capture() }
 
     // Springboard: the status bar sits in the top safe area.
     override func descendants(matching type: ElementType) -> XCUIElementQuery {
