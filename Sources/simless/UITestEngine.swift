@@ -44,16 +44,36 @@ enum UITestEngine {
         }
     }
 
-    /// The Swift files of one UI test target, as absolute paths.
+    /// The Swift files of one UI test target, as absolute, standardized paths.
+    /// The folder named like the target counts only when the target has no
+    /// synchronized folder, lists no Swift file and has no tests.uiSources.
     static func sourceFiles(target: String, pbx: String, projectDir: String, root: String, uiSources: String?) -> [String] {
-        let dirs = PBX.synchronizedFolders(target: target, pbx: pbx).map { "\(projectDir)/\($0)" } + (uiSources.map { ["\(root)/\($0)"] } ?? [])
-        let listed = PBX.sourceFiles(target: target, pbx: pbx).filter { $0.hasSuffix(".swift") }.map { "\(projectDir)/\($0)" }
+        let dirs = PBX.synchronizedFolders(target: target, pbx: pbx).map { absolute($0, in: projectDir) } + (uiSources.map { [absolute($0, in: root)] } ?? [])
+        let listed = PBX.sourceFiles(target: target, pbx: pbx).filter { $0.hasSuffix(".swift") }.map { absolute($0, in: projectDir) }
         let folders = dirs.isEmpty && listed.isEmpty ? ["\(projectDir)/\(target)"].filter { exists($0) } : dirs
         let found = folders.flatMap { dir -> [String] in
             guard let e = FileManager.default.enumerator(atPath: dir) else { return [] }
             return e.compactMap { $0 as? String }.filter { $0.hasSuffix(".swift") }.map { "\(dir)/\($0)" }
         }
-        return Set(found + listed).sorted()
+        return Set((found + listed).map(standardized)).sorted()
+    }
+
+    private static func absolute(_ path: String, in dir: String) -> String { path.hasPrefix("/") ? path : "\(dir)/\(path)" }
+    private static func standardized(_ path: String) -> String { URL(fileURLWithPath: path).standardizedFileURL.path }
+
+    /// The UI test sources that no other target compiles, by its Sources build
+    /// phase or a synchronized folder. Only those can leave the record of the
+    /// app's build: a file the app compiles too is an input of that build.
+    static func uiOnlySources(_ ws: Workspace) -> Set<String> {
+        let pbx = (try? String(contentsOfFile: "\(ws.root)/\(ws.config.project)/project.pbxproj", encoding: .utf8)) ?? ""
+        return uiOnly(targets(ws, includingUnbuilt: true).flatMap(\.sources), pbx: pbx, projectDir: ws.projectDir)
+    }
+
+    static func uiOnly(_ sources: [String], pbx: String, projectDir: String) -> Set<String> {
+        let others = Set(PBX.targetNames(pbx: pbx)).subtracting(uiTestTargets(pbx: pbx))
+        let files = Set(others.flatMap { PBX.sourceFiles(target: $0, pbx: pbx) }.map { standardized(absolute($0, in: projectDir)) })
+        let folders = others.flatMap { PBX.synchronizedFolders(target: $0, pbx: pbx) }.map { standardized(absolute($0, in: projectDir)) + "/" }
+        return Set(sources.map(standardized).filter { file in !files.contains(file) && !folders.contains { file.hasPrefix($0) } })
     }
 
     /// The UI test bundles in the scheme's .xctestrun.
@@ -82,49 +102,125 @@ enum UITestEngine {
         return out
     }
 
+    /// What the sources of a UI test target declare.
+    struct Discovery {
+        /// Test methods per class.
+        var tests: [TestID] = []
+        /// A class with tests in its chain whose superclass no file of the
+        /// target declares (in a package, say), so its chain can't reach XCTestCase.
+        var unknownSuperclasses: [(cls: String, superclass: String)] = []
+    }
+
+    static func tests(in target: UITarget) -> [TestID] { discover(target).tests }
+
     /// Test methods per class, from the sources. A class runs tests when its
     /// chain of superclasses, declared in any file of the target, reaches
-    /// XCTestCase. Its tests are the `func test...()` methods in its body, in
-    /// `extension <Class>` blocks in any file, and in its superclasses, as
-    /// XCTest runs inherited tests. A class with no such method yields none.
-    static func tests(in target: UITarget) -> [TestID] {
-        let decl = #/^(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:public|open|internal|private|fileprivate|final)\s+)*/#
+    /// XCTestCase. Its tests are the `func test...()` methods with no result,
+    /// at the top of its body or of an `extension <Class>` block in any file,
+    /// and those of its superclasses, as XCTest runs inherited tests. A class
+    /// with no such method yields none. Methods in a private extension, and
+    /// private methods, don't run in XCTest and aren't listed.
+    static func discover(_ target: UITarget) -> Discovery {
+        let decl = #/^(?:@\w+(?:\([^)]*\))?\s+)*((?:(?:public|open|internal|private|fileprivate|final)\s+)*)/#
+        let method = #/^\s+(?:(?:@\w+(?:\([^)]*\))?|public|open|internal|final|override|nonisolated|dynamic)\s+)*func\s+(test\w*)\s*\(\s*\)([^{]*)/#
         var superclass: [String: String] = [:]
         var declared: [String] = []                // classes, in source order
         var methods: [(type: String, name: String)] = []
         for file in target.sources {
             guard let text = try? String(contentsOfFile: file, encoding: .utf8) else { continue }
             var type: String?
+            var depth = 0
+            var lexer = CodeLexer()
             // Only what an iPhone simulator run would compile (see PlatformConditions).
-            for line in PlatformConditions.activeLines(text) {
-                // A declaration at the top level, after its attributes and modifiers.
-                let rest = line.prefixMatch(of: decl).map { line[$0.range.upperBound...] } ?? line[...]
-                if let c = rest.firstMatch(of: #/^class\s+(\w+)\s*(?::\s*(?:\w+\.)?(\w+))?/#) {
-                    type = String(c.1)
-                    declared.append(String(c.1))
-                    if let s = c.2 { superclass[String(c.1)] = String(s) }
+            for raw in PlatformConditions.activeLines(text) {
+                let line = lexer.code(raw)
+                let start = depth
+                depth = max(0, depth + line.filter { $0 == "{" }.count - line.filter { $0 == "}" }.count)
+                if start == 0 {
+                    // A declaration at the top level, after its attributes and modifiers.
+                    let trimmed = line.drop { $0 == " " || $0 == "\t" }
+                    let m = trimmed.prefixMatch(of: decl)
+                    let rest = m.map { trimmed[$0.range.upperBound...] } ?? trimmed
+                    let isPrivate = m.map { $0.output.1.contains("private") } ?? false
+                    if let c = rest.firstMatch(of: #/^class\s+(\w+)\s*(?:<[^>{]*>)?\s*(?::\s*(?:\w+\.)?(\w+))?/#) {
+                        type = String(c.1)
+                        declared.append(String(c.1))
+                        if let s = c.2 { superclass[String(c.1)] = String(s) }
+                    } else if let e = rest.firstMatch(of: #/^extension\s+(?:\w+\.)?(\w+)\b/#) {
+                        type = isPrivate ? nil : String(e.1)
+                    } else if rest.first.map({ $0.isLetter || $0 == "@" }) == true {
+                        // Another declaration; a brace on its own line keeps the class.
+                        type = nil
+                    }
                     continue
                 }
-                if let e = rest.firstMatch(of: #/^extension\s+(?:\w+\.)?(\w+)\b/#) { type = String(e.1); continue }
-                if rest.firstMatch(of: #/^(?:struct|enum|protocol|actor|func|var|let|typealias)\s/#) != nil { type = nil; continue }
-                if let t = type, let m = line.firstMatch(of: #/^\s+(?:@\w+\s+)*func\s+(test\w*)\s*\(\s*\)/#) {
+                if start == 1, let t = type, let m = line.prefixMatch(of: method), !m.output.2.contains("->") {
                     methods.append((t, String(m.1)))
                 }
             }
         }
-        func ancestors(_ c: String) -> [String] {    // c first, up to XCTestCase; [] when it never gets there
+        let withTests = Set(methods.map(\.type))
+        var out = Discovery()
+        var seen = Set<TestID>()
+        var reported = Set<String>()
+        for c in declared {
+            // c first, then its superclasses, while a file declares them.
             var chain = [c]
-            while let s = superclass[chain.last!], chain.count < 64 {
-                if s == "XCTestCase" { return chain }
+            var end: String?
+            while chain.count < 64, let s = superclass[chain.last!] {
+                if s == "XCTestCase" { end = s; break }
+                if chain.contains(s) || !declared.contains(s) { break }
                 chain.append(s)
             }
-            return []
+            if end == nil, let last = chain.last, let s = superclass[last], s != "XCTestCase", s != "NSObject", !declared.contains(s),
+               !withTests.isDisjoint(with: chain), reported.insert(last).inserted {
+                out.unknownSuperclasses.append((last, s))
+            }
+            guard end != nil else { continue }
+            let members = Set(chain)
+            for m in methods where members.contains(m.type) {
+                let id = TestID(target: target.name, cls: c, method: m.name)
+                if seen.insert(id).inserted { out.tests.append(id) }
+            }
         }
-        var seen = Set<TestID>()
-        return declared.flatMap { c in
-            let chain = Set(ancestors(c))
-            return methods.filter { chain.contains($0.type) }.map { TestID(target: target.name, cls: c, method: $0.name) }
-        }.filter { seen.insert($0).inserted }
+        return out
+    }
+
+    /// The code of each line, without comments and the text of string
+    /// literals, so braces and declarations in them don't count.
+    struct CodeLexer {
+        private var inComment = false
+        private var inMultiline = false
+
+        mutating func code(_ line: Substring) -> String {
+            var out = ""
+            var i = line.startIndex
+            func at(_ s: String) -> Bool { line[i...].hasPrefix(s) }
+            while i < line.endIndex {
+                if inComment {
+                    if at("*/") { inComment = false; i = line.index(i, offsetBy: 2) } else { i = line.index(after: i) }
+                } else if inMultiline {
+                    if at("\"\"\"") { inMultiline = false; out += "\"\""; i = line.index(i, offsetBy: 3) } else { i = line.index(after: i) }
+                } else if at("//") {
+                    break
+                } else if at("/*") {
+                    inComment = true; i = line.index(i, offsetBy: 2)
+                } else if at("\"\"\"") {
+                    inMultiline = true; i = line.index(i, offsetBy: 3)
+                } else if line[i] == "\"" {
+                    // A one-line literal: its text goes, up to the closing quote.
+                    out += "\"\""
+                    i = line.index(after: i)
+                    while i < line.endIndex && line[i] != "\"" {
+                        i = line.index(i, offsetBy: line[i] == "\\" && line.index(after: i) < line.endIndex ? 2 : 1)
+                    }
+                    if i < line.endIndex { i = line.index(after: i) }
+                } else {
+                    out.append(line[i]); i = line.index(after: i)
+                }
+            }
+            return out
+        }
     }
 
     // MARK: - Build
@@ -256,6 +352,15 @@ enum UITestEngine {
         let every = targets(ws, includingUnbuilt: true)
         let all = every.filter(\.built)
         guard !all.isEmpty else { throw noTargetsError(ws) }
+        let pbx = (try? String(contentsOfFile: "\(ws.root)/\(ws.config.project)/project.pbxproj", encoding: .utf8)) ?? ""
+        for target in all {
+            for f in PBX.unresolvedSwiftFiles(target: target.name, pbx: pbx) {
+                Log.info("note: \(target.name) compiles \(f.name) from \(f.sourceTree), which simless doesn't read; it's left out")
+            }
+            for u in discover(target).unknownSuperclasses {
+                Log.info("note: \(target.name): \(u.cls) inherits from \(u.superclass), which no file of the target declares, so its tests aren't found")
+            }
+        }
         let config = ws.config.tests
         let simulatorOnly = config?.simulatorOnly ?? [:]
         let skips = (config?.skip ?? []) + (args.repeated["--skip"] ?? []) + simulatorOnly.keys.sorted()
@@ -330,10 +435,7 @@ enum UITestEngine {
             if filters.isEmpty && !excluded.isEmpty {
                 throw SimlessError("every UI test is skipped: \(excluded.count) by --skip or tests.skip")
             }
-            if filters.isEmpty {
-                let files = all.map { "\($0.name) (\($0.sources.count) Swift file(s))" }.joined(separator: ", ")
-                throw SimlessError("found no test methods in \(files): simless looks for `func test...()` in classes that inherit from XCTestCase, and in extensions of them")
-            }
+            if filters.isEmpty { throw SimlessError(noTestsMessage(all)) }
             throw SimlessError("no UI tests match \(filters.joined(separator: " "))")
         }
 
@@ -450,12 +552,33 @@ enum UITestEngine {
     /// no sources for the ones that are.
     static func noTargetsError(_ ws: Workspace) -> SimlessError {
         let names = builtTargetNames(ws).sorted()
-        guard let first = names.first else { return SimlessError("no UI test targets in the build (is the UI test target in the scheme?)") }
-        let project = ws.config.project
-        return SimlessError("no UI test sources found for \(names.joined(separator: ", ")): \(names.count == 1 ? "it has" : "they have") "
-            + "no synchronized folder and no Swift file in the Sources build phase in \(project), and no folder \(ws.projectDir)/\(first); "
-            + "set tests.uiSources in .simless.json to its folder, relative to the repository: "
-            + "{\"tests\": {\"uiSources\": {\"\(first)\": \"<folder>\"}}}")
+        if names.isEmpty { return SimlessError("no UI test targets in the build (is the UI test target in the scheme?)") }
+        let pbx = (try? String(contentsOfFile: "\(ws.root)/\(ws.config.project)/project.pbxproj", encoding: .utf8)) ?? ""
+        return SimlessError("no UI test sources found:\n" + names.map {
+            "  " + missingSourcesReason(target: $0, pbx: pbx, project: ws.config.project, projectDir: ws.projectDir,
+                                         uiSources: ws.config.tests?.uiSources?[$0])
+        }.joined(separator: "\n"))
+    }
+
+    /// Why one UI test target in the build has no source, and what to set.
+    static func missingSourcesReason(target: String, pbx: String, project: String, projectDir: String, uiSources: String?) -> String {
+        let setting = "set tests.uiSources in .simless.json to its folder, relative to the repository: {\"tests\": {\"uiSources\": {\"\(target)\": \"<folder>\"}}}"
+        if let folder = uiSources { return "\(target): tests.uiSources names \(folder), which holds no Swift file" }
+        let synced = PBX.synchronizedFolders(target: target, pbx: pbx)
+        if !synced.isEmpty {
+            return "\(target): no Swift file in its synchronized folders (\(synced.joined(separator: ", "))) or its Sources build phase in \(project); \(setting)"
+        }
+        return "\(target): no synchronized folder, no Swift file in its Sources build phase in \(project), and no folder \(projectDir)/\(target); \(setting)"
+    }
+
+    /// The error of a run with no filter that finds no test method.
+    static func noTestsMessage(_ targets: [UITarget]) -> String {
+        targets.map { t in
+            let unknown = discover(t).unknownSuperclasses.map { "\($0.cls) inherits from \($0.superclass), which no file of \(t.name) declares" }
+            return "found no test methods in \(t.name) (\(t.sources.count) Swift file(s)): simless looks for `func test...()` in classes "
+                + "whose chain of superclasses, declared in these files, reaches XCTestCase, and in extensions of them"
+                + (unknown.isEmpty ? "" : "; " + unknown.joined(separator: "; "))
+        }.joined(separator: "\n")
     }
 
     /// UI hosts are light (about 1.5 GB each) and mostly wait on the app, so up to

@@ -23,9 +23,10 @@ enum BuildState {
 
     /// Every file the app's build can read: everything under the project's
     /// folder and the local packages, minus build output and the UI test
-    /// sources (simless builds those itself, from current sources, every run).
+    /// sources that no other target compiles (simless builds those itself,
+    /// from current sources, every run).
     static func inputs(_ ws: Workspace) -> [String] {
-        let uiSources = Set(UITestEngine.targets(ws, includingUnbuilt: true).flatMap(\.sources))
+        let uiSources = UITestEngine.uiOnlySources(ws)
         let roots = [ws.projectDir] + ws.packages.map { URL(fileURLWithPath: "\(ws.root)/\($0)").standardizedFileURL.path }
         var out = Set<String>()
         let fm = FileManager.default
@@ -39,7 +40,8 @@ enum BuildState {
                 }
                 guard e.fileAttributes?[.type] as? FileAttributeType == .typeRegular else { continue }
                 let path = "\(root)/\(rel)"
-                if !uiSources.contains(path) { out.insert(path) }
+                // UI test sources are standardized paths; the project's folder may not be.
+                if !uiSources.contains(URL(fileURLWithPath: path).standardizedFileURL.path) { out.insert(path) }
             }
         }
         return out.sorted()
