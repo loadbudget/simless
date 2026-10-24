@@ -87,26 +87,50 @@ enum Previews {
     struct Generated {
         var texts: [String: String] = [:]   // file -> what the dylib compiles of it
         var entries: [Entry] = []
+        var keys: [Key] = []                // each entry's, by index
         var calls: [String] = []            // registration functions, in order
         var ranges: [String: [(entry: Int, lines: ClosedRange<Int>)]] = [:]
     }
 
+    /// A preview or root by its file and its name before `generate` makes it
+    /// distinct: what a compile error leaves out, so an error in one file never
+    /// leaves out an entry of another.
+    struct Key: Hashable {
+        var file: String
+        var name: String
+    }
+
     /// The registration code for every preview and the root, leaving out
     /// `skip`, or only for `only`, keeping `keepAlso`'s chunks of each file too.
-    static func generate(_ input: PatchScope.Input, skip: [String: String], only: Set<String>? = nil,
+    ///
+    /// Names: `root` for a `@main` App, `<File>.<preview name or number>` for a
+    /// preview. Of the entries that compile, the first with a name keeps it, as
+    /// the first `root` did, and each later one gets the lowest `.<n>` from 2 up
+    /// that no entry has (`root.2`, `LoginView.Error.2`). Files with `@main` come
+    /// first, then by path. An entry left out keeps its name, and registers none.
+    static func generate(_ input: PatchScope.Input, skip: [Key: String], only: Set<String>? = nil,
                          keepAlso: [String: Set<Int>] = [:]) -> Generated {
         let g = PatchScope.graph(input)
         var out = Generated()
-        var counter = 0
         // The App's file first, so `root` comes before the previews.
         let files = input.sources.keys.sorted { a, b in
             let (ma, mb) = (input.sources[a]!.contains("@main"), input.sources[b]!.contains("@main"))
             return ma != mb ? ma : a < b
         }
+        struct Found {
+            var entry: Entry
+            var key: Key
+            var chunk: Int
+            var span: ClosedRange<Int>
+            var fn: String
+            var make: (String) -> Result<String, SimlessError>
+            var made: Result<String, SimlessError>
+        }
+        var found: [Found] = []
         for file in files {
-            guard let text = input.sources[file], let cs = g.chunksByFile[file], let keys = g.nodeOf[file], let first = cs.first else { continue }
+            guard let text = input.sources[file], let cs = g.chunksByFile[file] else { continue }
             let base = ((file as NSString).lastPathComponent as NSString).deletingPathExtension
-            var replaced: [Int: String] = [:]
+            let inPackage = input.moduleOf[file].map { $0 != input.appModule } == true
             var number = 0
             for (i, c) in cs.enumerated() {
                 let isPreview = c.kind == .preview || (c.kind == .type && c.inherits.contains("PreviewProvider"))
@@ -115,35 +139,56 @@ enum Previews {
                 if isPreview { number += 1 }
                 let line = 1 + (text as NSString).substring(to: c.start).filter { $0 == "\n" }.count
                 let span = line...(line + c.text.filter { $0 == "\n" }.count)
-                counter += 1
-                let fn = "simlessPreview\(counter)"
-                var entry = Entry(name: "", file: file, line: line)
-                var made: Result<String, SimlessError>
+                let fn = "simlessPreview\(found.count + 1)"
+                let name: String
+                let make: (String) -> Result<String, SimlessError>
                 if isApp {
-                    entry.name = "root"
-                    made = root(c.text, fn: fn)
+                    name = "root"
+                    make = { root(c.text, name: $0, fn: fn) }
                 } else if c.kind == .type {
-                    entry.name = "\(base).\(c.name)"
-                    made = provider(c.text, type: c.name, name: entry.name, fn: fn)
+                    name = "\(base).\(c.name)"
+                    make = { provider(c.text, type: c.name, name: $0, fn: fn) }
                 } else {
-                    let label = previewLabel(c.text)
-                    entry.name = "\(base).\(label ?? String(number))"
-                    made = preview(c.text, name: entry.name, fn: fn)
+                    name = "\(base).\(previewLabel(c.text) ?? String(number))"
+                    make = { preview(c.text, name: $0, fn: fn) }
                 }
-                if input.moduleOf[file].map({ $0 != input.appModule }) == true {
-                    made = .failure(SimlessError("it's in a local package; only the app target's previews are generated"))
-                }
-                if let only, !only.contains(entry.name) { continue }
-                if let why = skip[entry.name] { made = .failure(SimlessError(why)) }
-                switch made {
+                let made: Result<String, SimlessError> =
+                    inPackage ? .failure(SimlessError("it's in a local package; only the app target's previews are generated"))
+                    : skip[Key(file: file, name: name)].map { .failure(SimlessError($0)) } ?? make(name)
+                found.append(Found(entry: Entry(name: name, file: file, line: line), key: Key(file: file, name: name), chunk: i, span: span, fn: fn, make: make, made: made))
+            }
+        }
+        // A later entry that compiles with a name taken gets a distinct one.
+        let names = Set(found.map(\.entry.name))
+        var given: [String: Int] = [:]
+        var taken = Set<String>()
+        for i in found.indices {
+            guard case .success = found[i].made else { continue }
+            let name = found[i].entry.name
+            given[name, default: 0] += 1
+            guard given[name]! > 1 else { taken.insert(name); continue }
+            var n = given[name]!
+            while names.contains("\(name).\(n)") || taken.contains("\(name).\(n)") { n += 1 }
+            found[i].entry.name = "\(name).\(n)"
+            found[i].made = found[i].make(found[i].entry.name)
+            taken.insert(found[i].entry.name)
+        }
+        for file in files {
+            guard let text = input.sources[file], let cs = g.chunksByFile[file], let keys = g.nodeOf[file], let first = cs.first else { continue }
+            var replaced: [Int: String] = [:]
+            for f in found where f.entry.file == file {
+                if let only, !only.contains(f.entry.name) { continue }
+                var entry = f.entry
+                switch f.made {
                 case .success(let code):
-                    replaced[i] = code
-                    out.calls.append(fn)
-                    out.ranges[file, default: []].append((out.entries.count, span))
+                    replaced[f.chunk] = code
+                    out.calls.append(f.fn)
+                    out.ranges[file, default: []].append((out.entries.count, f.span))
                 case .failure(let why):
                     entry.skipped = why.description
                 }
                 out.entries.append(entry)
+                out.keys.append(f.key)
             }
             guard !replaced.isEmpty else { continue }
             // The file's private declarations the generated code uses stay; the
@@ -263,7 +308,7 @@ enum Previews {
 
     /// The `@main` App as a view: its properties, and its first WindowGroup's
     /// content as the body.
-    static func root(_ text: String, fn: String) -> Result<String, SimlessError> {
+    static func root(_ text: String, name: String, fn: String) -> Result<String, SimlessError> {
         var text = text
         // The delegate adaptor only works in an App: read the app's delegate instead.
         let adaptor = try! NSRegularExpression(pattern: #"@UIApplicationDelegateAdaptor\(\s*([A-Za-z_][\w.]*)\.self\s*\)\s*((?:(?:private|fileprivate|internal|public)\s+)?)var\s+(\w+)(\s*:\s*[\w.]+)?"#)
@@ -321,8 +366,9 @@ enum Previews {
             inner = (inner as NSString).replacingCharacters(in: r, with: PatchScope.blank((inner as NSString).substring(with: r)))
         }
         let header = ns.substring(to: open + 1)
-        return .success("struct SimlessRootView: View {" + newlines(Substring(header)) + inner
-                        + "}; @MainActor func \(fn)(_ r: SimlessRegistry) { if !r.names.contains(\"root\") { r.add(\"root\") { SimlessRootView() } } }"
+        let view = "SimlessRootView\(fn.dropFirst("simlessPreview".count))"
+        return .success("struct \(view): View {" + newlines(Substring(header)) + inner
+                        + "}; @MainActor func \(fn)(_ r: SimlessRegistry) { if !r.names.contains(\(literal(name))) { r.add(\(literal(name))) { \(view)() } } }"
                         + ns.substring(from: end + 1))
     }
 
@@ -334,16 +380,22 @@ enum Previews {
     /// and the build throws. A build without SimlessKit gets its fixtures only
     /// from this dylib, so it is built for it even with no preview, or with
     /// `"previews": false`.
+    /// The files previews and `root` come from: those with a `#Preview`, a
+    /// `PreviewProvider` or `@main`.
+    private static func input(_ ws: Workspace) -> PatchScope.Input {
+        var input = PatchScope.input(ws: ws, edited: [])
+        input.sources = ws.config.previews == false ? [:]
+            : input.sources.filter { $0.value.contains("#Preview") || $0.value.contains("PreviewProvider") || $0.value.contains("@main") }
+        return input
+    }
+
     @discardableResult
     static func build(ws: Workspace, slot: SlotRecord, settings: Workspace.Settings) throws -> Manifest {
         let t = now()
         let d = dir(ws)
         try? FileManager.default.removeItem(atPath: d)
         try mkdirp(d)
-        var input = PatchScope.input(ws: ws, edited: [])
-        input.sources = ws.config.previews == false ? [:]
-            : input.sources.filter { $0.value.contains("#Preview") || $0.value.contains("PreviewProvider") || $0.value.contains("@main") }
-        let m = try compileLeavingOut(input, alwaysBuild: !slot.kitInBuild) { gen, prelude in
+        let m = try compileLeavingOut(input(ws), alwaysBuild: !slot.kitInBuild) { gen, prelude in
             try Patch.compile(ws: ws, slot: slot, settings: settings, files: gen.texts.keys.sorted(), texts: gen.texts,
                               name: "SimlessPreviews", dir: d, prelude: prelude, entry: "        simlessRegisterPreviews(r)",
                               forNewBuild: true)
@@ -352,7 +404,7 @@ enum Previews {
         if let failure = m.failure { throw SimlessError(failure) }
         if m.dylib != nil, !m.entries.isEmpty {
             let made = m.entries.filter { $0.skipped == nil }.count
-            Log.step("previews: \(made) fixture(s) from #Preview\(m.entries.contains { $0.name == "root" } ? " and the App" : "") in \(secs(t))")
+            Log.step("previews: \(made) fixture(s) from #Preview\(m.entries.contains { $0.name == "root" && $0.skipped == nil } ? " and the App" : "") in \(secs(t))")
         }
         return m
     }
@@ -365,7 +417,7 @@ enum Previews {
     /// also when the last round left out the last preview).
     static func compileLeavingOut(_ input: PatchScope.Input, rounds: Int = 5, alwaysBuild: Bool = false,
                                   compile: (Generated, String) throws -> String) throws -> Manifest {
-        var skip: [String: String] = [:]
+        var skip: [Key: String] = [:]
         var lastError: SimlessError?
         func prelude(_ gen: Generated) -> String {
             let calls = gen.calls.map { "    \($0)(r)" }.joined(separator: "\n")
@@ -390,8 +442,8 @@ enum Previews {
                     let message = parts[4].trimmingCharacters(in: .whitespaces)
                     let inFile = gen.ranges[file] ?? []
                     let hit = inFile.filter { $0.lines.contains(n) }
-                    for (e, _) in hit.isEmpty ? inFile : hit where skip[gen.entries[e].name] == nil {
-                        skip[gen.entries[e].name] = "doesn't compile outside Xcode's previews: \(message)"
+                    for (e, _) in hit.isEmpty ? inFile : hit where skip[gen.keys[e]] == nil {
+                        skip[gen.keys[e]] = "doesn't compile outside Xcode's previews: \(message)"
                         blamed += 1
                     }
                 }
@@ -418,14 +470,13 @@ enum Previews {
 
     /// For a hot reload that renders previews: their files as the patch
     /// compiles them (with what the patch keeps of them anyway), and the
-    /// registrations to run after the build's.
+    /// registrations to run after the build's. It generates from every file the
+    /// build did, with what the build left out, so each name is the build's.
     static func patchCode(ws: Workspace, names: [String], kept: [String: Set<Int>], texts: [String: String])
         -> (texts: [String: String], prelude: String, entry: String) {
-        let refs = (manifest(ws)?.entries ?? []).filter { names.contains($0.name) }
-        var input = PatchScope.input(ws: ws, edited: [])
-        let files = Set(refs.map(\.file))
-        input.sources = input.sources.filter { files.contains($0.key) }
-        let gen = generate(input, skip: [:], only: Set(names), keepAlso: kept)
+        let skip = Dictionary((manifest(ws)?.entries ?? []).compactMap { e in e.skipped.map { (Key(file: e.file, name: e.name), $0) } },
+                              uniquingKeysWith: { a, _ in a })
+        let gen = generate(input(ws), skip: skip, only: Set(names), keepAlso: kept)
         let calls = gen.calls.map { "        \($0)(r)" }.joined(separator: "\n")
         return (texts.merging(gen.texts) { $1 }, helpers, Patch.registerPreviews + "\n" + calls)
     }
@@ -463,13 +514,24 @@ enum Previews {
 
     /// One line for `simless up`: what was generated and what was left out.
     static func summary(_ ws: Workspace) -> String? {
-        guard let m = manifest(ws), !m.entries.isEmpty else { return nil }
+        manifest(ws).flatMap { summary($0, root: ws.root, manifestPath: manifestPath(ws)) }
+    }
+
+    /// An entry left out whose name another entry has too is named with its
+    /// file, relative to `root`.
+    static func summary(_ m: Manifest, root: String, manifestPath: String) -> String? {
+        guard !m.entries.isEmpty else { return nil }
         let skipped = m.entries.filter { $0.skipped != nil }
         let made = m.dylib == nil ? 0 : m.entries.count - skipped.count
+        let shared = Set(Dictionary(grouping: m.entries, by: \.name).filter { $0.value.count > 1 }.keys)
+        func label(_ e: Entry) -> String {
+            guard shared.contains(e.name) else { return e.name }
+            return "\(e.name) in \(e.file.hasPrefix(root + "/") ? String(e.file.dropFirst(root.count + 1)) : e.file)"
+        }
         var s = "previews: \(made) of \(m.entries.count) generated"
         if !skipped.isEmpty {
-            s += "; left out: " + skipped.prefix(5).map { "\($0.name) (\($0.skipped!))" }.joined(separator: "; ")
-            if skipped.count > 5 { s += "; +\(skipped.count - 5) more in \(manifestPath(ws))" }
+            s += "; left out: " + skipped.prefix(5).map { "\(label($0)) (\($0.skipped!))" }.joined(separator: "; ")
+            if skipped.count > 5 { s += "; +\(skipped.count - 5) more in \(manifestPath)" }
         }
         return s
     }

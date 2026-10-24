@@ -90,18 +90,18 @@ final class PreviewsTests: XCTestCase {
 
     func testRootIsTheAppAsAView() throws {
         let copy = try XCTUnwrap(Previews.generate(input(), skip: [:]).texts["NotesApp.swift"])
-        XCTAssertTrue(copy.contains("struct SimlessRootView: View {"))
+        XCTAssertTrue(copy.contains("struct SimlessRootView1: View {"))
         XCTAssertFalse(copy.contains("@main"))
         XCTAssertTrue(copy.contains("var appDelegate: AppDelegate { simlessAppDelegate(AppDelegate.self) }"))
         XCTAssertTrue(copy.contains("@StateObject private var settings = AppSettings()"))
         XCTAssertFalse(copy.contains("Analytics.start()"))       // the App's init runs once, in the app
         XCTAssertTrue(copy.contains(".modelContainer(for: Note.self)"))
         XCTAssertFalse(copy.contains(".commands"))               // a scene-only modifier
-        XCTAssertTrue(copy.contains("r.add(\"root\") { SimlessRootView() }"))
+        XCTAssertTrue(copy.contains("r.add(\"root\") { SimlessRootView1() }"))
     }
 
     func testSkippedPreviewsAreLeftOutWithTheReason() {
-        let g = Previews.generate(input(), skip: ["NoteRow.Short": "doesn't compile"])
+        let g = Previews.generate(input(), skip: [.init(file: "NoteRow.swift", name: "NoteRow.Short"): "doesn't compile"])
         XCTAssertEqual(g.entries.first { $0.name == "NoteRow.Short" }?.skipped, "doesn't compile")
         XCTAssertFalse(g.texts["NoteRow.swift"]!.contains("NoteRow.Short"))
     }
@@ -144,6 +144,86 @@ final class PreviewsTests: XCTestCase {
         }
         XCTAssertNil(m.failure)
         XCTAssertTrue(m.entries.allSatisfy { $0.skipped != nil })
+    }
+
+    let watchApp = """
+        import SwiftUI
+        import WatchKit
+
+        @main
+        struct NotesWatchApp: App {
+            var body: some Scene {
+                WindowGroup { WatchView() }
+            }
+        }
+        """
+
+    /// The iOS app and a watchOS app in another folder, each with a `Short` preview in a `NoteRow.swift`.
+    func twoApps() -> PatchScope.Input {
+        var i = PatchScope.Input()
+        i.sources = ["/w/App/NotesApp.swift": app, "/w/App/NoteRow.swift": row,
+                     "/w/Watch/NotesWatchApp.swift": watchApp, "/w/Watch/NoteRow.swift": "import SwiftUI\n\n#Preview(\"Short\") {\n    WatchRow()\n}\n"]
+        return i
+    }
+
+    func testASecondEntryWithANameTakenGetsANumber() {
+        let g = Previews.generate(twoApps(), skip: [:])
+        XCTAssertEqual(g.entries.map(\.name), ["root", "root.2", "NoteRow.Short", "NoteRow.2", "NoteRow.3", "NoteRow.NoteRow_Previews", "NoteRow.Short.2"])
+        XCTAssertEqual(g.entries.map(\.file), ["/w/App/NotesApp.swift", "/w/Watch/NotesWatchApp.swift"] + Array(repeating: "/w/App/NoteRow.swift", count: 4) + ["/w/Watch/NoteRow.swift"])
+        XCTAssertTrue(g.texts["/w/Watch/NotesWatchApp.swift"]!.contains("r.add(\"root.2\") { SimlessRootView2() }"))
+        XCTAssertTrue(g.texts["/w/Watch/NoteRow.swift"]!.contains("r.add(\"NoteRow.Short.2\")"))
+    }
+
+    func testAnAppThatFailsLeavesOutOnlyItsOwnRoot() throws {
+        var compiled = 0
+        let m = try Previews.compileLeavingOut(twoApps()) { gen, _ in
+            compiled += 1
+            if compiled == 1 { throw SimlessError("patch compile failed\n/w/Watch/NotesWatchApp.swift:2:8: error: no such module 'WatchKit'") }
+            XCTAssertTrue(gen.texts["/w/App/NotesApp.swift"]!.contains("r.add(\"root\")"))
+            XCTAssertNil(gen.texts["/w/Watch/NotesWatchApp.swift"])
+            return "/tmp/previews.dylib"
+        }
+        XCTAssertEqual(compiled, 2)
+        let roots = m.entries.filter { $0.name == "root" }
+        XCTAssertEqual(roots.map(\.file), ["/w/App/NotesApp.swift", "/w/Watch/NotesWatchApp.swift"])
+        XCTAssertEqual(roots.map(\.skipped), [nil, "doesn't compile outside Xcode's previews: no such module 'WatchKit'"])
+        XCTAssertFalse(m.entries.contains { $0.name == "root.2" })
+        XCTAssertEqual(Previews.summary(m, root: "/w", manifestPath: "/w/previews.json"),
+                       "previews: 5 of 7 generated; left out: root in Watch/NotesWatchApp.swift (doesn't compile outside Xcode's previews: no such module 'WatchKit'); NoteRow.3 (a widget or Live Activity preview, not a view)")
+    }
+
+    func testTheAppThatCompilesIsRootWhenTheOneBeforeItFails() throws {
+        var i = PatchScope.Input()
+        i.sources = ["/w/B/NotesApp.swift": app, "/w/A/NotesWatchApp.swift": watchApp]
+        var compiled = 0
+        let m = try Previews.compileLeavingOut(i) { gen, _ in
+            compiled += 1
+            if compiled == 1 {
+                XCTAssertEqual(gen.entries.map(\.name), ["root", "root.2"])
+                throw SimlessError("patch compile failed\n/w/A/NotesWatchApp.swift:2:8: error: no such module 'WatchKit'")
+            }
+            XCTAssertTrue(gen.texts["/w/B/NotesApp.swift"]!.contains("r.add(\"root\")"))
+            return "/tmp/previews.dylib"
+        }
+        XCTAssertEqual(compiled, 2)
+        XCTAssertEqual(m.entries.map(\.name), ["root", "root"])
+        XCTAssertEqual(m.entries.map(\.file), ["/w/A/NotesWatchApp.swift", "/w/B/NotesApp.swift"])
+        XCTAssertEqual(m.entries.map { $0.skipped == nil }, [false, true])
+    }
+
+    func testAPreviewThatFailsLeavesOutOnlyThePreviewOfItsFile() throws {
+        var compiled = 0
+        let m = try Previews.compileLeavingOut(twoApps()) { gen, _ in
+            compiled += 1
+            if compiled == 1 { throw SimlessError("patch compile failed\n/w/App/NoteRow.swift:11:5: error: cannot find 'sample' in scope") }
+            XCTAssertTrue(gen.texts["/w/Watch/NoteRow.swift"]!.contains("r.add(\"NoteRow.Short\")"))
+            return "/tmp/previews.dylib"
+        }
+        XCTAssertEqual(compiled, 2)
+        let shorts = m.entries.filter { $0.name == "NoteRow.Short" }
+        XCTAssertEqual(shorts.map(\.file), ["/w/App/NoteRow.swift", "/w/Watch/NoteRow.swift"])
+        XCTAssertEqual(shorts.map(\.skipped), ["doesn't compile outside Xcode's previews: cannot find 'sample' in scope", nil])
+        XCTAssertFalse(m.entries.contains { $0.name == "NoteRow.Short.2" })
     }
 
     func testOnlyGeneratesWhatsAsked() {
