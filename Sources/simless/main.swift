@@ -44,6 +44,7 @@ simless: fast, headless, simulator-free SwiftUI checks for AI agents.
   simless status                   hosts, test runs going on and their share of the Mac, disk use
   simless down [--all]             stop this worktree's hosts, render, test and UI (or every worktree's); they start again on next use
   simless clean [--all]            remove this worktree's host, slot and build cache (--all: everything simless created)
+  simless clean --worktree <path>  the same for the worktree at <path>, also after it is removed
   simless skill install            install the Claude Code skill so agents know how to use simless
   simless agent install            build + start SimlessAgent (enables ~1.5 s live reload; needs Full Disk Access)
 
@@ -62,7 +63,7 @@ struct Args {
 
     init(_ raw: [String]) {
         let valued: Set<String> = ["--hosts", "--device", "--png", "--render", "--kit-dir", "--scheme", "--project", "--test-target", "--template",
-                                   "--locale", "--text-size", "--idiom", "--settle", "--timeout", "--runtime", "--sim-device", "--jobs", "--from"]
+                                   "--locale", "--text-size", "--idiom", "--settle", "--timeout", "--runtime", "--sim-device", "--jobs", "--from", "--worktree"]
         let repeatable: Set<String> = ["--skip"]
         var i = 0
         while i < raw.count {
@@ -899,7 +900,8 @@ do {
     case "doctor": try cmdDoctor(args)
     case "down": try cmdDown(args)
     case "agent": try cmdAgent(args)
-    case "clean": try Cleanup.clean(all: args.flags.contains("--all"))
+    case "clean":
+        if let worktree = args.values["--worktree"] { try Cleanup.clean(worktree: worktree) } else { try Cleanup.clean(all: args.flags.contains("--all")) }
     case "calibrate":
         let ws = try Workspace.load()
         try Calibrate.run(ws: ws, slot: try currentSlot(ws),

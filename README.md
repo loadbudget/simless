@@ -201,6 +201,7 @@ simless doctor [--json]           whether this Mac can run simless (macOS, Xcode
 simless down [--all]              stop this worktree's hosts, test and UI hosts included (--all: every worktree's,
                                   said before it stops them, except where a test run is going on)
 simless clean [--all]             remove this worktree's host, slot and build cache (--all: everything)
+simless clean --worktree <path>   the same for the worktree at <path>, also after it is removed
 simless agent install             install SimlessAgent (live reload in the dfi mode only)
 simless skill install             install the Claude Code skill
 simless version                   version, Xcode and macOS
