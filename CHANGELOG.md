@@ -3,6 +3,10 @@
 <!-- One section per version: `## 0.1.0 (2026-10-09)`. Notes for the next
      release go under `## Unreleased`. -->
 
+## Unreleased
+
+- **The kit compiles only in simless builds.** `SimlessKit.swift`, `SimlessFixtures.swift` and the App hook are under `#if SIMLESS` instead of `#if DEBUG && os(iOS)`, so an app's own Debug build no longer compiles the host, its private API calls or its fixtures. `simless calibrate` now builds with the condition too. Run `simless init` to update: it moves an App hook from the old guard to the new one.
+
 ## 0.7.2 (2026-10-23)
 
 Fixes from running simless as the screen checker on customer apps in our pipeline: Form and List screens no longer crash the host under the phone idiom, `act` taps a button inside a card, and a List that loads after the first frame is read. All of it is in SimlessRuntime and the CLI, so no `simless init`.

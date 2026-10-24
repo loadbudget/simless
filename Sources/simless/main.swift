@@ -179,7 +179,7 @@ func cmdInit(_ args: Args) throws {
                 : "\(config.kitDir) isn't in a folder Xcode syncs for \(appTarget): add both files to the \(appTarget) target (in Xcode: File > Add Files, with \(appTarget) checked under Targets)\(synchronized.isEmpty ? "" : ", or move the folder into one of \(synchronized.prefix(5).joined(separator: ", "))"). Until then, `simless up` fails with \"cannot find 'SimlessHost' in scope\".")
           2. \(hook.map { "App hook: \($0)" } ?? """
         In your App's init(), add:
-                 #if DEBUG && os(iOS)
+                 #if SIMLESS
                  SimlessHost.startIfRequested()
                  #endif
         """)
@@ -310,7 +310,7 @@ func initTemplate(_ dir: String, _ args: Args) throws {
         print("""
             App hook: add this to the App's init()\(appFile.map { " in \($0)" } ?? ""), so the app answers simless:
 
-                #if DEBUG && os(iOS)
+                #if SIMLESS
                 SimlessHost.startIfRequested()
                 #endif
             """)
@@ -322,8 +322,11 @@ func initTemplate(_ dir: String, _ args: Args) throws {
 func insertHook(in sourceDir: String) throws -> String? {
     let call = "SimlessHost.startIfRequested()"
     func block(_ indent: String) -> String {
-        ["#if DEBUG && os(iOS)", call, "#endif"].map { indent + $0 + "\n" }.joined()
+        ["#if \(Workspace.condition)", call, "#endif"].map { indent + $0 + "\n" }.joined()
     }
+    // Kits before `#if SIMLESS` had the call under `#if DEBUG && os(iOS)`. The
+    // kit no longer compiles in a plain Debug build, so neither may the call.
+    let oldGuard = try! NSRegularExpression(pattern: #"#if DEBUG && os\(iOS\)(\s*\n\s*SimlessHost\.startIfRequested\(\))"#)
     guard let e = FileManager.default.enumerator(atPath: sourceDir) else { return nil }
     while let rel = e.nextObject() as? String {
         guard rel.hasSuffix(".swift"), !rel.contains("Simless/") else { continue }
@@ -331,7 +334,13 @@ func insertHook(in sourceDir: String) throws -> String? {
         guard var s = try? String(contentsOfFile: path, encoding: .utf8),
               let decl = s.range(of: #"@main\s+struct\s+\w+\s*:\s*([\w.]+\s*,\s*)*App\b[^{]*\{"#, options: .regularExpression)
         else { continue }
-        if s.contains(call) { return "already present in \(rel)" }
+        if s.contains(call) {
+            let text = NSMutableString(string: s)
+            guard oldGuard.replaceMatches(in: text, range: NSRange(location: 0, length: text.length),
+                                          withTemplate: "#if \(Workspace.condition)$1") > 0 else { return "already present in \(rel)" }
+            try (text as String).write(toFile: path, atomically: true, encoding: .utf8)
+            return "moved under #if \(Workspace.condition) in \(rel)"
+        }
         // An existing init(): add the call as its first statement.
         if let initRange = s.range(of: #"\n([ \t]*)init\(\)\s*\{[ \t]*\n"#, options: .regularExpression, range: decl.upperBound..<s.endIndex) {
             let indent = String(s[initRange].dropFirst().prefix { $0 == " " || $0 == "\t" }) + "    "

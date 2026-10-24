@@ -66,7 +66,7 @@ A slot is installed through a zero-test `xcodebuild test-without-building -only-
 
 ## 3. The render host (SimlessKit)
 
-`SimlessKit.swift` is a single `#if DEBUG` file that `simless init` adds to the app. It does nothing unless the app is launched with `--simless-port`. When it is, it:
+`SimlessKit.swift` is a single `#if SIMLESS` file that `simless init` adds to the app. It does nothing unless the app is launched with `--simless-port`. When it is, it:
 
 - **Hides the app** whenever simless launched it, including the install and unit-test runs, which carry `SIMLESS_HEADLESS=1` in their `.xctestrun`:
   - during `App.init`, before any window exists, it makes AppKit's window-ordering calls no-ops.

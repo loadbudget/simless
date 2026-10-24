@@ -6,7 +6,7 @@ import SwiftUI
 @main
 struct SimlessDemoApp: App {
     init() {
-        #if DEBUG && os(iOS)
+        #if SIMLESS
         SimlessHost.startIfRequested()
         #endif
         RemoteConfig.fetch()

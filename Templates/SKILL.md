@@ -30,7 +30,7 @@ Some exist without any code: `root` (the app's first window, as the `@main` App 
 `SimlessFixtures.swift` is normal app code:
 
 ```swift
-#if DEBUG && os(iOS)
+#if SIMLESS
 import SwiftUI
 
 @MainActor
