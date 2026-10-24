@@ -32,7 +32,7 @@ enum Calibrate {
         let deviceType = options.device ?? simDeviceType
         let udid = try createSimulator(runtime: options.runtime, device: deviceType)
         defer { deleteSimulator(udid) }
-        let simPort = slot.port + 1000
+        let simPort = try freePort(avoiding: [slot.port])
         try buildAndLaunch(ws: ws, udid: udid, port: simPort)
         let sim = try LineClient(port: simPort, timeout: 30)
         var mac = try host.client(timeout: 30)

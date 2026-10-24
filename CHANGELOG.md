@@ -7,6 +7,7 @@
 
 - **The kit compiles only in simless builds.** `SimlessKit.swift`, `SimlessFixtures.swift` and the App hook are under `#if SIMLESS` instead of `#if DEBUG && os(iOS)`, so an app's own Debug build no longer compiles the host, its private API calls or its fixtures. `simless calibrate` now builds with the condition too. Run `simless init` to update: it moves an App hook from the old guard to the new one.
 - **A slot's number comes from the path of its worktree.** A slot was `<id>.simless1`, `2`, ..., the lowest number free in `state.json`, so every worktree took its number from one shared list. Now the number is a hash of the worktree path in decimal (`<id>.simless4829301746`), so a worktree's slot doesn't depend on which other worktrees ran first. It is still digits, so SimlessAgent's check takes it with no reinstall. The first `simless up` after the update removes the worktree's slot under its old number and makes the new one. Two worktrees whose paths hash to one number stop with an error that names both.
+- **The OS picks a host's port.** A new slot took the first port from 47800 that no record in `state.json` held, so it needed every worktree's ports. Now the OS gives a free one (a bind to port 0), and simless skips the ports of stopped hosts. When a stopped host's port has gone to another program, the next command gives the slot a new one, where before the host failed to start. `simless calibrate` asks the OS for the simulator's port too, instead of the host's port plus 1000.
 
 ## 0.7.2 (2026-10-23)
 
