@@ -484,24 +484,24 @@ func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws 
                 attempt = Date()
                 do {
                     (text, issues) = try Render.run(slot: slot, fixture: fixture, options: options)
-                } catch let error as SimlessError where slot.stats() == nil {
-                    crashed.append((fixture, CrashReport.summary(slot: slot, since: attempt) ?? error.description))
+                } catch is SimlessError where slot.stats() == nil {
+                    crashed.append((fixture, CrashReport.summary(slot: slot, since: attempt).text))
                     try Slots.launch(slot, idleMinutes: ws.idleMinutes, locale: locale)
                 }
             }
             do {
                 (text, issues) = try Render.run(slot: slot, fixture: fixture, options: options)
-            } catch let error as Render.ProbeCrash {
+            } catch is Render.ProbeCrash {
                 // Looking for a Stepper under the iPad idiom took the host down, so
                 // the phone idiom isn't the trouble: render with it.
-                let reason = CrashReport.summary(slot: slot, since: attempt) ?? error.description
+                let reason = CrashReport.summary(slot: slot, since: attempt).text
                 try Slots.launch(slot, idleMinutes: ws.idleMinutes, locale: locale)
                 Log.info("note: \(fixture) crashed the host under the iPad idiom (\(reason)). Rendering it with the phone idiom.")
                 try retry()
-            } catch let error as SimlessError where slot.stats() == nil {
+            } catch is SimlessError where slot.stats() == nil {
                 // The render took the host down. SwiftUI's Stepper does that on the
                 // Mac, most often under the phone idiom: retry with the iPad idiom.
-                let reason = CrashReport.summary(slot: slot, since: attempt) ?? error.description
+                let reason = CrashReport.summary(slot: slot, since: attempt).text
                 try Slots.launch(slot, idleMinutes: ws.idleMinutes, locale: locale)
                 if options.idiom != nil {
                     Log.info("note: \(fixture) crashed the host under the phone idiom (\(reason)). Rendering it with the iPad idiom.")
