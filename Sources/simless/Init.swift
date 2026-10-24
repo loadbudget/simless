@@ -17,8 +17,10 @@ func writeConfig(_ config: Config, to path: String) throws {
 /// With no `kitDir` in `fresh`, a fresh file keeps the old one's, so the
 /// fixtures file stays where it is. Then it removes the kit and the App hook
 /// that older inits wrote (`removeKit`). Returns the config in effect, whether
-/// the old file was kept, and a line for each file removed or left.
-func initFiles(root: String, force: Bool, fresh: Config) throws -> (config: Config, kept: Bool, removed: [String]) {
+/// the old file was kept, a line for each file changed or left, and a line for
+/// each use of SimlessHost that stopped the removal.
+func initFiles(root: String, force: Bool, fresh: Config) throws
+    -> (config: Config, kept: Bool, removed: [String], blocked: [String]) {
     let path = "\(root)/\(Workspace.configName)"
     // A file that doesn't load stops init, unless `force` replaces it.
     let previous = !exists(path) ? nil : force ? (try? Workspace.load(at: root))?.config : try Workspace.load(at: root).config
@@ -26,7 +28,8 @@ func initFiles(root: String, force: Bool, fresh: Config) throws -> (config: Conf
     var config = fresh
     if config.kitDir == nil { config.kitDir = previous?.kitDir }
     if kept, let previous { config = previous } else { try writeConfig(config, to: path) }
-    return (config, kept, try removeKit(root: root, config: previous ?? config))
+    let (removed, blocked) = try removeKit(root: root, config: previous ?? config)
+    return (config, kept, removed, blocked)
 }
 
 /// A line in the first comment of every SimlessKit.swift that `simless init` wrote.
@@ -47,40 +50,89 @@ let appDeclPattern = #"@main\s+struct\s+\w+\s*:\s*([\w.]+\s*,\s*)*App\b[^{]*\{"#
 /// hook is out of it: right after the declaration's brace, and empty.
 let addedInit = "\n    init() {\n    }\n"
 
-/// An app needs no simless source file: SimlessRuntime serves renders. Removes
-/// what older `simless init` runs wrote: SimlessKit.swift, when its first
-/// comment has the kit's line (`isSimlessKit`), and the App hook, when its text is exactly what init wrote.
-/// Keeps the fixtures file. Returns a line for each thing removed, or left.
-func removeKit(root: String, config: Config) throws -> [String] {
-    var report: [String] = []
+/// A line of the app's sources that names SimlessHost, which only the kit defines.
+typealias SimlessUse = (file: String, line: Int, text: Substring)
+
+/// Each line that names SimlessHost in the .swift files of `config.sourceDirs`,
+/// outside the kit file. It skips hidden folders and the folder of another app:
+/// one with its own `.simless.json`, or with an Xcode project other than
+/// `config.project`.
+func simlessUses(root: String, config: Config) -> [SimlessUse] {
     let kit = "\(root)/\(config.kitFile)"
-    if let text = try? String(contentsOfFile: kit, encoding: .utf8) {
-        if isSimlessKit(text) {
-            try FileManager.default.removeItem(atPath: kit)
-            report.append("removed \(config.kitFile): SimlessRuntime serves renders")
-        } else {
-            report.append("left \(config.kitFile): simless did not write it")
-        }
-    }
-    let skip = "\(root)/\(config.fixturesDir)/"
+    let ownProject = "\(root)/\(config.project)"
+    var uses: [SimlessUse] = []
     for dir in config.sourceDirs {
         let base = dir == "." ? root : "\(root)/\(dir)"
         guard let e = FileManager.default.enumerator(atPath: base) else { continue }
         while let rel = e.nextObject() as? String {
             let path = "\(base)/\(rel)"
-            guard rel.hasSuffix(".swift"), !path.hasPrefix(skip),
-                  let text = try? String(contentsOfFile: path, encoding: .utf8),
-                  text.contains("SimlessHost.startIfRequested()") else { continue }
+            let name = (rel as NSString).lastPathComponent
+            if e.fileAttributes?[.type] as? FileAttributeType == .typeDirectory {
+                let entries = (try? FileManager.default.contentsOfDirectory(atPath: path)) ?? []
+                let otherApp = entries.contains(Workspace.configName)
+                    || entries.contains { $0.hasSuffix(".xcodeproj") && "\(path)/\($0)" != ownProject }
+                if name.hasPrefix(".") || otherApp { e.skipDescendants() }
+                continue
+            }
+            guard rel.hasSuffix(".swift"), path != kit,
+                  let text = try? String(contentsOfFile: path, encoding: .utf8), text.contains("SimlessHost") else { continue }
             let shown = dir == "." ? rel : "\(dir)/\(rel)"
-            if let without = removeHook(from: text) {
-                try without.write(toFile: path, atomically: true, encoding: .utf8)
-                report.append("removed the App hook from \(shown)")
-            } else {
-                report.append("left SimlessHost.startIfRequested() in \(shown): it is not in the form simless init wrote; remove it by hand")
+            for (i, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() where line.contains("SimlessHost") {
+                uses.append((shown, i + 1, line))
             }
         }
     }
-    return report
+    return uses
+}
+
+/// What the user does with a use of SimlessHost that init does not remove.
+func fixFor(_ use: SimlessUse) -> String {
+    use.text.contains("SimlessHost.startIfRequested()") ? "remove this call and the #if block around it"
+        : use.text.contains("SimlessHost.isActive") ? "use ProcessInfo.processInfo.arguments.contains(\"--simless-port\") instead"
+        : "remove it: SimlessHost is only in SimlessKit.swift"
+}
+
+/// An app needs no simless source file: SimlessRuntime serves renders. Removes
+/// what older `simless init` runs wrote, all of it or nothing: SimlessKit.swift,
+/// when its first comment has the kit's line (`isSimlessKit`), and the App
+/// hook, when its text is exactly what init wrote. When another use of
+/// SimlessHost would stay, it changes nothing and returns each use in
+/// `blocked`. Keeps the fixtures file.
+func removeKit(root: String, config: Config) throws -> (removed: [String], blocked: [String]) {
+    let kit = "\(root)/\(config.kitFile)"
+    let kitText = try? String(contentsOfFile: kit, encoding: .utf8)
+    let uses = simlessUses(root: root, config: config)
+    if let kitText, !isSimlessKit(kitText), uses.isEmpty {
+        return (["left \(config.kitFile): simless did not write it"], [])
+    }
+    guard kitText != nil || !uses.isEmpty else { return ([], []) }
+
+    // Each file whose only use is a hook that `removeHook` takes out.
+    var edits: [(file: String, text: String)] = []
+    var blocked: [String] = []
+    if let kitText, !isSimlessKit(kitText) {
+        blocked.append("\(config.kitFile): simless did not write it; delete it by hand if it is an older SimlessKit")
+    }
+    if kitText == nil { blocked.append("\(config.kitFile): not there, so SimlessHost comes from another file") }
+    for file in Set(uses.map(\.file)).sorted() {
+        let inFile = uses.filter { $0.file == file }
+        let path = "\(root)/\(file)"
+        if inFile.count == 1, let text = try? String(contentsOfFile: path, encoding: .utf8), let without = removeHook(from: text) {
+            edits.append((file, without))
+        } else {
+            blocked += inFile.map { "\($0.file):\($0.line): \(fixFor($0))" }
+        }
+    }
+    if !blocked.isEmpty { return ([], blocked) }
+
+    try FileManager.default.removeItem(atPath: kit)
+    var removed = ["removed \(config.kitFile): SimlessRuntime serves renders"]
+    for edit in edits {
+        try edit.text.write(toFile: "\(root)/\(edit.file)", atomically: true, encoding: .utf8)
+        removed.append("removed the App hook from \(edit.file)")
+    }
+    removed.append("note: `simless calibrate` needs the kit and the App hook for now, so it does not run on this app")
+    return (removed, [])
 }
 
 /// `text` without the App hook (and the init() that held only the hook, when

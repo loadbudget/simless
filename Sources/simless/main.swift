@@ -115,7 +115,7 @@ func cmdInit(_ args: Args) throws {
     // Local Swift packages the project references: their views can be hot-reloaded too.
     let packages = Workspace.localPackages(root: root, project: project)
 
-    let (config, kept, removed) = try initFiles(
+    let (config, kept, removed, blocked) = try initFiles(
         root: root, force: args.flags.contains("--force"),
         fresh: Config(project: project, scheme: scheme, appTarget: appTarget, testTarget: testTarget,
                       kitDir: args.values["--kit-dir"], sourceDirs: [sourceDir], packages: packages.isEmpty ? nil : packages))
@@ -138,6 +138,7 @@ func cmdInit(_ args: Args) throws {
         : "wrote \(Workspace.configName): project \(project), scheme \(scheme), app \(appTarget), tests \(testTarget.isEmpty ? "none" : testTarget)\(packages.isEmpty ? "" : ", packages " + packages.joined(separator: ", "))"
     print(configLine)
     for line in removed { print(line) }
+    try stopIfBlocked(blocked)
     let fixtures = exists("\(root)/\(config.fixturesFile)")
     print("""
 
@@ -219,12 +220,24 @@ func initTemplate(_ dir: String, _ args: Args) throws {
     guard !sourceDirs.isEmpty else { throw SimlessError("\(appTarget) lists no sources in project.yml") }
     let packages = (spec["packages"] as? [String: [String: Any]] ?? [:]).compactMap { $0.value["path"] as? String }.sorted()
 
-    let (_, kept, removed) = try initFiles(
+    let (_, kept, removed, blocked) = try initFiles(
         root: root, force: args.flags.contains("--force"),
         fresh: Config(project: "\(name).xcodeproj", scheme: appTarget, appTarget: appTarget, testTarget: testTarget,
                       kitDir: args.values["--kit-dir"], sourceDirs: sourceDirs, packages: packages.isEmpty ? nil : packages))
     print("\(kept ? "kept" : "wrote") \(Workspace.configName): project \(name).xcodeproj, app \(appTarget), tests \(testTarget.isEmpty ? "none" : testTarget)")
     for line in removed { print(line) }
+    try stopIfBlocked(blocked)
+}
+
+/// Stops init when it left the kit and the App hook: code still uses SimlessHost.
+func stopIfBlocked(_ blocked: [String]) throws {
+    guard !blocked.isEmpty else { return }
+    fflush(stdout)
+    throw SimlessError("""
+        changed no app file: the app still uses SimlessHost, which only SimlessKit.swift defines. \
+        Fix each line below, then run `simless init` again.
+        \(blocked.map { "  " + $0 }.joined(separator: "\n"))
+        """)
 }
 
 func cmdSkill(_ args: Args) throws {

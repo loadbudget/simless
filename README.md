@@ -152,13 +152,14 @@ SimlessHost.startIfRequested()
 #endif
 ```
 
-`simless init` removes both and prints what it removed. It removes the kit only when its first line is the one simless wrote, and the call only in that exact form (under `#if SIMLESS` or the older `#if DEBUG && os(iOS)`), with the `init()` around it when simless added that too. It prints any other call it finds, for you to remove. It keeps `SimlessFixtures.swift`. `simless calibrate` still needs the kit (see [Calibration](docs/architecture.md#calibration)).
+`simless init` removes both and prints what it removed. It removes the kit only when its first line is the one simless wrote, and the call only in that exact form (under `#if SIMLESS` or the older `#if DEBUG && os(iOS)`), with the `init()` around it when simless added that too. It removes nothing while other code still uses `SimlessHost` (a call in another form, or a `SimlessHost.isActive` check): then it lists each line, with what to change, and you run it again. It keeps `SimlessFixtures.swift`. `simless calibrate` still needs the kit (see [Calibration](docs/architecture.md#calibration)).
 
 Some fixtures come for free. `root` is the app's first window, as its `@main` App builds it, and every `#Preview` block (and `PreviewProvider`) is a fixture named `<File>.<preview name or number>`, like `LoginView.Error` or `NoteRow.2`. `simless up` compiles them against the build, and `simless render all` lists them after yours. A preview that can't be built outside Xcode is left out, and `up` says which and why.
 
-Register the screens agents should be able to render, each in a deterministic state, in `<App>/Simless/SimlessFixtures.swift` (`kitDir` in `.simless.json` names another folder). The file is optional. simless compiles it into the code it loads into the host, and leaves it out of the app build, so it needs no target membership:
+Register the screens agents should be able to render, each in a deterministic state, in `<App>/Simless/SimlessFixtures.swift` (`kitDir` in `.simless.json` names another folder). The file is optional. simless compiles it into the code it loads into the host. When the app has no kit, the builds that simless runs leave it out of the app. Your own Xcode, CI and archive builds still compile it when it sits in a folder of the app target, so keep the `#if SIMLESS` guard:
 
 ```swift
+#if SIMLESS
 import SwiftUI
 
 @MainActor
@@ -167,6 +168,7 @@ func simlessFixtures(_ r: SimlessRegistry) {
     r.add("NoteList.empty") { NoteListView(notes: []) }
     r.add("NoteList.long") { NoteListView(notes: .fixture(count: 50)) }
 }
+#endif
 ```
 
 Then run `simless up`. Render hosts get no network: every request the app makes through `URLSession` fails as if the Mac were offline, and the render lists what was blocked (see `network` under [Options](#options-in-simlessjson) to allow or stub hosts). If app startup has other side effects a background host shouldn't trigger (an SDK starting up, writing to a shared service), guard them with `ProcessInfo.processInfo.arguments.contains("--simless-port")` inside `#if SIMLESS`: simless starts a render host with that argument.

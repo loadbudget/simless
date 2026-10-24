@@ -17,7 +17,7 @@ simless status        # fails with "no .simless.json" if the repo isn't set up
 
 If it isn't set up, do it yourself:
 
-1. Run `simless init` at the repo root. It writes `.simless.json`, the only file simless needs. Add no simless code to the app. In a repo that an older simless set up, it also removes `SimlessKit.swift` and the `SimlessHost.startIfRequested()` call in the App's `init()`, and prints what it removed. When it says it left a call, remove that call by hand.
+1. Run `simless init` at the repo root. It writes `.simless.json`, the only file simless needs. Add no simless code to the app. In a repo that an older simless set up, it also removes `SimlessKit.swift` and the `SimlessHost.startIfRequested()` call in the App's `init()`, and prints what it removed. While other code still uses `SimlessHost`, it removes nothing and lists each line to change: change those lines, then run `simless init` again.
 2. If app startup has side effects that a background render host shouldn't trigger (analytics, sync, network), guard them: `if !ProcessInfo.processInfo.arguments.contains("--simless-port") { ... }`, inside `#if SIMLESS`.
 3. Run `simless up`. The first build takes a few minutes; later ones are incremental. Add fixtures (below) for the states the previews don't show.
 
@@ -27,9 +27,10 @@ If it isn't set up, do it yourself:
 
 Some exist without any code: `root` (the app's first window, as the `@main` App builds it) and one per `#Preview` block, named `<File>.<preview name or number>`. `simless up` lists them. Render those first. Add fixtures for states the previews don't show.
 
-Put them in `<App>/Simless/SimlessFixtures.swift` (or the folder `kitDir` in `.simless.json` names). simless compiles that file into the code it loads into the host, and leaves it out of the app build, so don't add it to a target:
+Put them in `<App>/Simless/SimlessFixtures.swift` (or the folder `kitDir` in `.simless.json` names). simless compiles that file into the code it loads into the host. When the app has no kit, the builds that simless runs leave it out of the app. Other builds compile it when it sits in a folder of the app target, so keep the `#if SIMLESS` guard:
 
 ```swift
+#if SIMLESS
 import SwiftUI
 
 @MainActor
@@ -39,6 +40,7 @@ func simlessFixtures(_ r: SimlessRegistry) {
     r.add("NoteList.empty") { NoteListView(notes: []) }
     r.add("NoteList.long") { NoteListView(notes: .fixture(count: 50, longTitles: true)) }
 }
+#endif
 ```
 
 - **One fixture per meaningful state:** normal, empty, loading, error, long content.
