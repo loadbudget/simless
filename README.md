@@ -146,7 +146,7 @@ That's all. Older versions ran the app as a signed "Designed for iPad" install, 
 
 - `.simless.json`
 - `<App>/Simless/SimlessKit.swift`: the render host. It's generated, compiled only in simless builds (`#if SIMLESS`), and does nothing unless simless launches the app. When this file is not there, SimlessRuntime serves renders instead (see [architecture](docs/architecture.md#3-the-render-host-simlesskit-or-simlessruntime)).
-- `<App>/Simless/SimlessFixtures.swift`: your screens.
+- `<App>/Simless/SimlessFixtures.swift`: your screens. An app without `SimlessKit.swift` may leave this file out too. Its fixtures are then `root` and its `#Preview` blocks, and the repository needs only `.simless.json`.
 
 It also adds one call to your `@main` App's `init()` (pass `--no-hook` to skip that):
 
@@ -369,7 +369,7 @@ What can't run here runs in a simulator: `simless test --simulator-only` prints 
 - `embeddedBundles`: `false` removes app extensions and the watch app from the slot.
 - `mode`: `"native"` (the default) runs the app unsigned. `"dfi"` runs it as a signed "Designed for iPad" install in the app sandbox, which needs a certificate and the team's wildcard development profile. `SIMLESS_MODE=dfi` does the same for one command. `SIMLESS_TEAM`, then `"team"` here, then the project's `DEVELOPMENT_TEAM` pick the team it signs with.
 - `settle`: milliseconds each render gives the screen for its async work (`.task`, loads) before the tree is read, like `--settle`. Default 0, because a fixture that injects its data needs none.
-- `previews`: `false` turns off the fixtures from `#Preview` blocks and `root`. They're on by default.
+- `previews`: `false` turns off the fixtures from `#Preview` blocks and `root`. They're on by default. An app with no `SimlessKit.swift` and no `SimlessFixtures.swift` has no other fixtures, so `simless up` stops with an error when this is `false`.
 - `hostIdleMinutes`, `standbyIdleMinutes` and `diskLimitGB`: see [Many agents, one Mac](#many-agents-one-mac). The environment variables win, for a machine's own policy.
 - `network`: render hosts get no network by default. A request through `URLSession` (any configuration) or `NSURLConnection` fails with `URLError.notConnectedToInternet`, except to loopback, and each render after new ones says `network: blocked 6 requests: api.example.com (/v1/user, /v1/events); …` (once per request, per host). `allow` lists hosts or URLs that may go through, as globs (`"api.example.com"`, `"*.example.com"`, `"https://example.com/v1/*"`). `stub` serves a file (relative to the repository) for matching URLs, with status 200. `"block": false`, or `SIMLESS_NETWORK=allow` for one command, turns it off. Unit and UI test hosts keep the network, since tests can depend on it; `"tests": true` blocks it there too. WKWebView content and code that opens its own sockets (Network.framework, gRPC) aren't covered.
 - `isolate`: `true` (or `SIMLESS_ISOLATE=1`) puts every native host in a sandbox of its own, for machines that build many projects as one user. The app's code can then write only into its slot, read only its worktree and build folder in the user's home, and can't connect to other simless hosts. Frameworks, Xcode and the network work as before, and so do renders and tests: the demo's 48 renders, unit and UI tests came out the same.

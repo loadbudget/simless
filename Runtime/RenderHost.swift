@@ -12,7 +12,9 @@ import SwiftUI
 import UIKit
 import Network
 
-/// Fixtures are registered by `simlessFixtures(_:)` in SimlessFixtures.swift.
+/// Fixtures are registered by `simlessFixtures(_:)` in SimlessFixtures.swift,
+/// when the app has that file, and by the fixtures simless generates from
+/// `#Preview` blocks.
 @MainActor
 public final class SimlessRegistry {
     public private(set) var names: [String] = []
@@ -367,6 +369,11 @@ enum SimlessHost {
     private enum MountResult { case success(Mounted), failure(Response) }
 
     private static func mount(_ req: Request) -> MountResult {
+        // The fixtures arrive only with a dylib simless loads. Before the first
+        // one, an empty registry says nothing about which fixtures exist.
+        guard patchGeneration > 0 else {
+            return .failure(Response(ok: false, error: "no fixtures loaded yet: simless loads them into the host after `simless up` compiles them; run `simless up` if this stays"))
+        }
         guard let name = req.fixture, let view = registry.make(name) else {
             return .failure(Response(ok: false, error: "unknown fixture '\(req.fixture ?? "")'", fixtures: registry.names))
         }

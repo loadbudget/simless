@@ -115,4 +115,63 @@ final class RenderServerTests: XCTestCase {
         XCTAssertEqual(fixtures.dylib, "/tmp/previews.dylib")
         XCTAssertEqual(compiled, 1)
     }
+
+    func setPreviews(_ on: Bool) throws {
+        try """
+            {"project": "App.xcodeproj", "scheme": "App", "appTarget": "App", "testTarget": "", "kitDir": "Src/Simless", "sourceDirs": ["Src"], "device": "iphone", "previews": \(on)}
+            """.write(toFile: "\(root!)/.simless.json", atomically: true, encoding: .utf8)
+        ws = try Workspace.load(at: root)
+    }
+
+    func writeFixtures() throws {
+        try "// fixtures\n".write(toFile: "\(root!)/\(ws.config.fixturesFile)", atomically: true, encoding: .utf8)
+    }
+
+    /// No kit and no fixtures file: the fixtures are the #Preview blocks. The
+    /// dylib leaves out the fixtures file and the call to `simlessFixtures`,
+    /// and still registers each preview.
+    func testWithoutTheKitAndTheFixturesFileTheDylibHasThePreviewsAlone() throws {
+        try """
+            import SwiftUI
+            struct Card: View { var body: some View { Text("card") } }
+            #Preview("Plain") { Card() }
+            """.write(toFile: "\(root!)/Src/Card.swift", atomically: true, encoding: .utf8)
+        XCTAssertNil(Patch.fixturesFile(ws: ws, kitInApp: false))
+        let entry = Patch.entrySource(appModule: "App", kitInApp: false, callsFixtures: false, prelude: "", entry: "        simlessRegisterPreviews(r)")
+        XCTAssertFalse(entry.contains("simlessFixtures"))
+        XCTAssertTrue(entry.contains("simlessRegisterPreviews(r)"))
+        var compiled: [String] = []
+        let m = try Previews.compileLeavingOut(PatchScope.input(ws: ws, edited: []), alwaysBuild: true) { gen, _ in
+            compiled = gen.texts.keys.map { ($0 as NSString).lastPathComponent }
+            return "/tmp/previews.dylib"
+        }
+        XCTAssertEqual(m.entries.map(\.name), ["Card.Plain"])
+        XCTAssertEqual(compiled, ["Card.swift"])
+    }
+
+    /// With the kit, the fixtures file is still part of every dylib: a missing
+    /// one fails the compile, as before.
+    func testWithTheKitTheFixturesFileIsAlwaysCompiled() throws {
+        XCTAssertEqual(Patch.fixturesFile(ws: ws, kitInApp: true), "\(root!)/\(ws.config.fixturesFile)")
+        XCTAssertTrue(Patch.entrySource(appModule: "App", kitInApp: true, callsFixtures: true, prelude: "", entry: "")
+            .contains("        simlessFixtures(r)\n"))
+        try writeFixtures()
+        XCTAssertEqual(Patch.fixturesFile(ws: ws, kitInApp: false), "\(root!)/\(ws.config.fixturesFile)")
+    }
+
+    func testUpRefusesAnAppWithNoKitNoFixturesFileAndNoPreviews() throws {
+        try setPreviews(false)
+        XCTAssertThrowsError(try ws.checkFixtureSources()) { error in
+            XCTAssertTrue("\(error)".contains("no fixtures"), "\(error)")
+            XCTAssertTrue("\(error)".contains("\"previews\": false"), "\(error)")
+        }
+        try setPreviews(true)
+        XCTAssertNoThrow(try ws.checkFixtureSources())
+        try setPreviews(false)
+        try writeFixtures()
+        XCTAssertNoThrow(try ws.checkFixtureSources())
+        try FileManager.default.removeItem(atPath: "\(root!)/\(ws.config.fixturesFile)")
+        try writeKit()
+        XCTAssertNoThrow(try ws.checkFixtureSources())
+    }
 }

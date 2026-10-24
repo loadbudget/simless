@@ -106,6 +106,20 @@ struct Workspace {
     /// SimlessRuntime for its registry.
     var kitInApp: Bool { exists("\(root)/\(config.kitFile)") }
 
+    /// Stops `up` when the app can have no fixture. Without the kit, the
+    /// fixtures come from the fixtures file, when the app has it, and from
+    /// `#Preview` blocks. With the kit, the app build needs the fixtures file.
+    func checkFixtureSources() throws {
+        guard !kitInApp, !exists("\(root)/\(config.fixturesFile)"), config.previews == false else { return }
+        throw SimlessError("no fixtures: the app has no \(config.kitFile) and no \(config.fixturesFile), and \(Self.configName) sets \"previews\": false. Add \(config.fixturesFile), or remove \"previews\": false to use the #Preview blocks")
+    }
+
+    /// What `up` and `render` say when the host has no fixture.
+    func noFixturesHint(kitInBuild: Bool) -> String {
+        kitInBuild ? "register some in \(config.fixturesFile)"
+            : "add #Preview blocks, or register some in \(config.fixturesFile)"
+    }
+
     static func findRoot(from start: String = FileManager.default.currentDirectoryPath) -> String? {
         var url = URL(fileURLWithPath: start)
         while url.path != "/" {
