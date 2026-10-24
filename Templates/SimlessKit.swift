@@ -269,24 +269,24 @@ enum SimlessHost {
 
     // MARK: - Rendering
 
-    /// The window fixtures render into, created on first use. On the Mac it's a
-    /// standalone hidden window. In a simulator (`simless calibrate`) it belongs
-    /// to the app's scene so the device's own safe areas and traits apply; the
-    /// scene may connect after the host starts, hence the lazy creation.
+    /// The window fixtures render into, created on first use. It belongs to the
+    /// app's scene: `UIWindow(frame:)` is deprecated since iOS 26, and an app
+    /// that treats warnings as errors refuses it. On the Mac the host runs
+    /// headless, so the window shows on no screen. In a simulator (`simless calibrate`) it goes on top, so the
+    /// device's own safe areas and traits apply. The scene may connect after
+    /// the host starts, hence the lazy creation.
     private static func renderWindow() -> UIWindow? {
         if let window { return window }
-        let frame = CGRect(x: 0, y: 0, width: 402, height: 874)
+        guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first else { return nil }
+        let w = UIWindow(windowScene: scene)
+        w.frame = CGRect(x: 0, y: 0, width: 402, height: 874)
         if ProcessInfo.processInfo.isiOSAppOnMac {
-            let w = UIWindow(frame: frame)
             w.isHidden = false
-            window = w
-        } else if let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first {
-            let w = UIWindow(windowScene: scene)
-            w.frame = frame
+        } else {
             w.windowLevel = .alert + 1
             w.makeKeyAndVisible()
-            window = w
         }
+        window = w
         return window
     }
 
