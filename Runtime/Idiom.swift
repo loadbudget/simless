@@ -8,7 +8,8 @@ import UIKit
 /// The idiom on the Mac. An iOS app there takes it from the screen, and simless
 /// asks for the phone idiom on a render's hosting controller only (SimlessKit),
 /// so two things break that a device never sees:
-/// - A window with no scene (the render window) has the screen's idiom, and on
+/// - A window with no scene (the render window on a Mac with no login session)
+///   has the screen's idiom, and on
 ///   some Macs the screen reports none: then every List traps in UIKit
 ///   ("unknown user interface idiom (UIUserInterfaceIdiom(rawValue: -1))").
 ///   Windows in render and unit test hosts get the device's idiom outright.
