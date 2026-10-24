@@ -75,9 +75,7 @@ enum Slots {
         // The runtime every launch of this slot injects (Dynamic Type, original
         // bundle ids, the test runner), outside the app so it never needs re-signing.
         let runtime = try RuntimeBuild.dylib(team: settings.team)
-        try? fm.removeItem(atPath: "\(slot.dir)/SimlessRuntime.dylib")
-        try fm.copyItem(atPath: runtime, toPath: "\(slot.dir)/SimlessRuntime.dylib")
-        try RuntimeHost.installModule(slot)
+        try RuntimeHost.installRuntime(slot, dylib: runtime)
         try settings.bundleID.write(toFile: "\(slot.dir)/original-id.txt", atomically: true, encoding: .utf8)
         Log.step("slot \(slot.slotID) prepared in \(secs(t))")
     }

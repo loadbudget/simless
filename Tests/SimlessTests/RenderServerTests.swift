@@ -22,6 +22,7 @@ final class RenderServerTests: XCTestCase {
 
     override func tearDown() {
         try? FileManager.default.removeItem(atPath: root)
+        try? FileManager.default.removeItem(atPath: Paths.workDir(forWorktree: root))
     }
 
     func slot(builtWithKit: Bool?) -> SlotRecord {
@@ -71,7 +72,10 @@ final class RenderServerTests: XCTestCase {
 
     func testDeletingOrAddingTheKitMakesReloadBuildTheApp() throws {
         XCTAssertEqual(fullBuildReason(ws: ws, slot: slot(builtWithKit: true), files: []), "SimlessKit deleted")
-        XCTAssertNil(fullBuildReason(ws: ws, slot: slot(builtWithKit: false), files: ["\(root!)/Src/A.swift"]))
+        let kitless = slot(builtWithKit: false)
+        try FileManager.default.createDirectory(atPath: kitless.dir, withIntermediateDirectories: true)
+        try RuntimeHost.recordInjected(kitless, build: "/r/x")
+        XCTAssertNil(fullBuildReason(ws: ws, slot: kitless, files: ["\(root!)/Src/A.swift"], currentRuntime: { "/r/x" }))
         try writeKit()
         XCTAssertEqual(fullBuildReason(ws: ws, slot: slot(builtWithKit: false), files: []), "SimlessKit added")
         XCTAssertNil(fullBuildReason(ws: ws, slot: slot(builtWithKit: true), files: ["\(root!)/Src/A.swift"]))
@@ -114,5 +118,66 @@ final class RenderServerTests: XCTestCase {
         }
         XCTAssertEqual(fixtures.dylib, "/tmp/previews.dylib")
         XCTAssertEqual(compiled, 1)
+    }
+
+    /// A folder that stands for a runtime build, with a module whose text
+    /// names the build.
+    func runtimeBuild(_ name: String) throws -> String {
+        let dir = "\(root!)/runtime/\(name)"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try name.write(toFile: "\(dir)/SimlessRuntime.swiftmodule", atomically: true, encoding: .utf8)
+        return dir
+    }
+
+    func moduleText(_ slot: SlotRecord) -> String? { try? String(contentsOfFile: RuntimeHost.module(slot), encoding: .utf8) }
+
+    func testTheSlotsModuleFollowsTheBuildItIsAskedFor() throws {
+        let s = slot(builtWithKit: false)
+        let a = try runtimeBuild("a"), b = try runtimeBuild("b")
+        XCTAssertEqual(try RuntimeHost.currentModule(s, build: a), RuntimeHost.moduleDir(s))
+        XCTAssertEqual(moduleText(s), "a")
+        _ = try RuntimeHost.currentModule(s, build: b)
+        XCTAssertEqual(moduleText(s), "b")
+        // A copy of the same build is not copied again.
+        try "b, kept".write(toFile: RuntimeHost.module(s), atomically: true, encoding: .utf8)
+        _ = try RuntimeHost.currentModule(s, build: b)
+        XCTAssertEqual(moduleText(s), "b, kept")
+    }
+
+    /// Without the kit, the host's dylibs bind to the runtime it injects, so
+    /// a reload across a runtime change builds the app again.
+    func testWithoutTheKitAChangedRuntimeMakesReloadBuildTheApp() throws {
+        let kitless = slot(builtWithKit: false)
+        XCTAssertEqual(fullBuildReason(ws: ws, slot: kitless, files: [], currentRuntime: { "/r/x" }), "SimlessRuntime changed")
+        try FileManager.default.createDirectory(atPath: kitless.dir, withIntermediateDirectories: true)
+        try RuntimeHost.recordInjected(kitless, build: "/r/x")
+        XCTAssertNil(fullBuildReason(ws: ws, slot: kitless, files: [], currentRuntime: { "/r/x" }))
+        XCTAssertEqual(fullBuildReason(ws: ws, slot: kitless, files: [], currentRuntime: { "/r/y" }), "SimlessRuntime changed")
+        try writeKit()
+        XCTAssertNil(fullBuildReason(ws: ws, slot: slot(builtWithKit: true), files: [], currentRuntime: { "/r/y" }))
+    }
+
+    /// A relaunch (locale, crash retry, undo, native warm reload) of a host
+    /// without the kit keeps its runtime, so the dylibs it loads match it.
+    func testALaunchWithoutTheKitKeepsTheRuntimeTheHostWasBuiltWith() throws {
+        let kitless = slot(builtWithKit: false)
+        XCTAssertFalse(RuntimeHost.keepsInjectedRuntime(kitless, current: "/r/y"), "no runtime in the slot yet")
+        try FileManager.default.createDirectory(atPath: kitless.dir, withIntermediateDirectories: true)
+        try "dylib".write(toFile: "\(kitless.dir)/SimlessRuntime.dylib", atomically: true, encoding: .utf8)
+        XCTAssertTrue(RuntimeHost.keepsInjectedRuntime(kitless, current: "/r/y"), "a copy of no known build")
+        try RuntimeHost.recordInjected(kitless, build: "/r/x")
+        XCTAssertTrue(RuntimeHost.keepsInjectedRuntime(kitless, current: "/r/y"))
+        XCTAssertFalse(RuntimeHost.keepsInjectedRuntime(kitless, current: "/r/x"))
+        XCTAssertFalse(RuntimeHost.keepsInjectedRuntime(slot(builtWithKit: true), current: "/r/y"))
+    }
+
+    /// A patch for the running host compiles only against the runtime it injects.
+    func testAPatchRefusesToCompileAgainstAnotherRuntime() throws {
+        let kitless = slot(builtWithKit: false)
+        try FileManager.default.createDirectory(atPath: kitless.dir, withIntermediateDirectories: true)
+        try RuntimeHost.recordInjected(kitless, build: "/r/not-current")
+        XCTAssertThrowsError(try RuntimeHost.injectedModule(kitless, current: "/r/current")) { error in
+            XCTAssertTrue("\(error)".contains("SimlessRuntime changed"), "\(error)")
+        }
     }
 }

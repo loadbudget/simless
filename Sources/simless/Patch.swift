@@ -104,9 +104,13 @@ enum Patch {
 
     /// `prelude` is top-level code for the entry file, `entry` runs after
     /// `simlessFixtures` with `r` (the registry) and `address` in scope.
+    /// `forNewBuild` is for `up`, which prepares the slot with the current
+    /// runtime meanwhile: without the kit, the dylib then compiles against the
+    /// current runtime's module. Otherwise it compiles against the module of
+    /// the runtime the slot injects.
     static func compile(ws: Workspace, slot: SlotRecord, settings: Workspace.Settings, files: [String],
                         texts: [String: String] = [:], name: String = "SimlessPatch", dir: String? = nil,
-                        prelude: String = "", entry entryCode: String = registerPreviews) throws -> String {
+                        prelude: String = "", entry entryCode: String = registerPreviews, forNewBuild: Bool = false) throws -> String {
         let dir = dir ?? "\(ws.work)/patches"
         try mkdirp(dir)
         let module = "\(name)\(slot.n)x\(slot.patch + 1)x\(Int(Date().timeIntervalSince1970) % 100000)"
@@ -190,7 +194,7 @@ enum Patch {
         if !kitInApp {
             // The module of the runtime the slot injects: a copy from an older
             // build, or no copy yet, would bind the dylib to the wrong runtime.
-            args += ["-I", try RuntimeHost.currentModule(slot)]
+            args += ["-I", try forNewBuild ? RuntimeHost.currentModule(slot) : RuntimeHost.injectedModule(slot)]
         }
         if let iso = effective.isolation { args += ["-default-isolation", iso] }
         for f in effective.features { args += ["-enable-upcoming-feature", f] }
