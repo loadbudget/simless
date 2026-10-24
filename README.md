@@ -363,7 +363,7 @@ What can't run here runs in a simulator: `simless test --simulator-only` prints 
 - `tests.timeout` and `tests.skip`: defaults for `--timeout` and `--skip`.
 - `tests.simulatorOnly`: tests that need a simulator, with the reason. They're skipped and counted apart, and `simless test --simulator-only` lists them. A test skipped with a reason that starts with "simulator only" counts too.
 - `tests.hosts` and `tests.jobs`: test hosts running side by side (default: up to 4 when there are 4 or more targets), and tests running at once in each. `tests.uiJobs` and `tests.uiTimeout`: hosts for UI tests, and seconds one UI test may run (default 600).
-- `tests.uiSources`: a UI test target's source folder, when it isn't a synchronized folder simless can find.
+- `tests.uiSources`: a UI test target's source folder, relative to the repository. simless reads a UI test target's sources from the project file: its synchronized folders and the files of its Sources build phase. Set this only when those hold none of its files.
 - `tests.uiDevices`: more devices for `simless test ui`, each with the tests that run on it (`[]` for all of them). The device in `device` runs every UI test.
 - `calibrate.runtime` and `calibrate.device`: the simulator `simless calibrate` compares against and the simulator-only command runs on (default: the newest runtime, iPhone 17 Pro).
 - `idiom`: `"phone"` or `"pad"` for phone canvases. The default is the phone idiom for an iPhone-only app and the iPad idiom otherwise (see [Known differences](#known-differences-from-an-iphone)).

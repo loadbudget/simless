@@ -3,10 +3,11 @@
 
 import Foundation
 
-/// Just enough of a project.pbxproj to know which folders Xcode compiles
-/// straight from disk: the synchronized folders (Xcode 16+) a target lists.
-/// A synchronized folder can sit inside classic groups, and its `path` is then
-/// relative to its parent group, so paths are resolved through the group tree.
+/// Just enough of a project.pbxproj to know what a target compiles: the
+/// synchronized folders (Xcode 16+) it lists, and the files of its Sources
+/// build phase.
+/// A synchronized folder or a file can sit inside classic groups, and its `path`
+/// is then relative to its parent group, so paths are resolved through the group tree.
 enum PBX {
     struct Object {
         let isa: String
@@ -56,17 +57,41 @@ enum PBX {
     /// The synchronized folders `target` compiles, relative to the project's directory.
     static func synchronizedFolders(target: String, pbx: String) -> [String] {
         let objects = objects(pbx)
+        guard let t = nativeTarget(target, objects) else { return [] }
+        return list("fileSystemSynchronizedGroups", t.body).compactMap(pathResolver(objects))
+    }
+
+    /// The files in `target`'s Sources build phase, relative to the project's
+    /// directory: the sources of a classic group, which Xcode lists one by one.
+    static func sourceFiles(target: String, pbx: String) -> [String] {
+        let objects = objects(pbx)
+        guard let t = nativeTarget(target, objects) else { return [] }
+        let fullPath = pathResolver(objects)
+        let phases = list("buildPhases", t.body).compactMap { objects[$0] }.filter { $0.isa == "PBXSourcesBuildPhase" }
+        return phases.flatMap { list("files", $0.body) }.compactMap { buildFile in
+            // A fileRef value reads `<id> /* <name> */`; a package product has a productRef instead.
+            guard let ref = objects[buildFile].flatMap({ field("fileRef", $0.body) })?.split(separator: " ").first else { return nil }
+            return fullPath(String(ref))
+        }
+    }
+
+    private static func nativeTarget(_ name: String, _ objects: [String: Object]) -> Object? {
+        objects.values.first { $0.isa == "PBXNativeTarget" && field("name", $0.body) == name }
+    }
+
+    /// An object's path relative to the project's directory, through the groups
+    /// that hold it.
+    private static func pathResolver(_ objects: [String: Object]) -> (String) -> String? {
         var parent: [String: String] = [:]
         for (id, o) in objects { for c in o.children { parent[c] = id } }
-        func fullPath(_ id: String, depth: Int = 0) -> String? {
+        func walk(_ id: String, depth: Int) -> String? {
             guard depth < 64, let o = objects[id] else { return nil }
             if o.sourceTree == "SOURCE_ROOT" { return o.path ?? "" }
             guard o.sourceTree == "<group>" else { return nil }
-            let up = parent[id].flatMap { fullPath($0, depth: depth + 1) } ?? ""
+            let up = parent[id].flatMap { walk($0, depth: depth + 1) } ?? ""
             guard let p = o.path, !p.isEmpty else { return up }
             return up.isEmpty ? p : "\(up)/\(p)"
         }
-        guard let t = objects.values.first(where: { $0.isa == "PBXNativeTarget" && field("name", $0.body) == target }) else { return [] }
-        return list("fileSystemSynchronizedGroups", t.body).compactMap { fullPath($0) }
+        return { walk($0, depth: 0) }
     }
 }

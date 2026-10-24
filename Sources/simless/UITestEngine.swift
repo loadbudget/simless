@@ -30,32 +30,44 @@ enum UITestEngine {
     // MARK: - Targets
 
     /// UI test targets in the build (the .xctestrun's UI test bundles), with
-    /// their sources (synchronized folders, or a folder named like the target).
+    /// their sources: the target's synchronized folders, the files of its
+    /// Sources build phase, and the folder tests.uiSources names; failing all
+    /// three, a folder named like the target.
     static func targets(_ ws: Workspace, includingUnbuilt: Bool = false) -> [UITarget] {
-        var names = Set<String>()
-        if let file = ws.appXCTestRun,
-           let data = FileManager.default.contents(atPath: file),
-           let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] {
-            var entries: [[String: Any]] = []
-            if let configs = plist["TestConfigurations"] as? [[String: Any]] {
-                entries = configs.flatMap { $0["TestTargets"] as? [[String: Any]] ?? [] }
-            } else {
-                entries = plist.filter { !$0.key.hasPrefix("__") }.compactMap { $0.value as? [String: Any] }
-            }
-            names = Set(entries.filter { $0["IsUITestBundle"] as? Bool == true }.compactMap { $0["BlueprintName"] as? String })
-        }
+        let names = builtTargetNames(ws)
         let pbx = (try? String(contentsOfFile: "\(ws.root)/\(ws.config.project)/project.pbxproj", encoding: .utf8)) ?? ""
         let unbuilt = includingUnbuilt ? uiTestTargets(pbx: pbx).subtracting(names) : []
         return (names.union(unbuilt)).sorted().compactMap { name in
-            let dirs = PBX.synchronizedFolders(target: name, pbx: pbx).map { "\(ws.projectDir)/\($0)" }
-                + (ws.config.tests?.uiSources?[name].map { ["\(ws.root)/\($0)"] } ?? [])
-            let folders = dirs.isEmpty ? ["\(ws.projectDir)/\(name)"].filter { exists($0) } : dirs
-            let sources = folders.flatMap { dir -> [String] in
-                guard let e = FileManager.default.enumerator(atPath: dir) else { return [] }
-                return e.compactMap { $0 as? String }.filter { $0.hasSuffix(".swift") }.map { "\(dir)/\($0)" }
-            }.sorted()
+            let sources = sourceFiles(target: name, pbx: pbx, projectDir: ws.projectDir, root: ws.root,
+                                      uiSources: ws.config.tests?.uiSources?[name])
             return sources.isEmpty ? nil : UITarget(name: name, sources: sources, built: !unbuilt.contains(name))
         }
+    }
+
+    /// The Swift files of one UI test target, as absolute paths.
+    static func sourceFiles(target: String, pbx: String, projectDir: String, root: String, uiSources: String?) -> [String] {
+        let dirs = PBX.synchronizedFolders(target: target, pbx: pbx).map { "\(projectDir)/\($0)" } + (uiSources.map { ["\(root)/\($0)"] } ?? [])
+        let listed = PBX.sourceFiles(target: target, pbx: pbx).filter { $0.hasSuffix(".swift") }.map { "\(projectDir)/\($0)" }
+        let folders = dirs.isEmpty && listed.isEmpty ? ["\(projectDir)/\(target)"].filter { exists($0) } : dirs
+        let found = folders.flatMap { dir -> [String] in
+            guard let e = FileManager.default.enumerator(atPath: dir) else { return [] }
+            return e.compactMap { $0 as? String }.filter { $0.hasSuffix(".swift") }.map { "\(dir)/\($0)" }
+        }
+        return Set(found + listed).sorted()
+    }
+
+    /// The UI test bundles in the scheme's .xctestrun.
+    static func builtTargetNames(_ ws: Workspace) -> Set<String> {
+        guard let file = ws.appXCTestRun,
+              let data = FileManager.default.contents(atPath: file),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return [] }
+        let entries: [[String: Any]]
+        if let configs = plist["TestConfigurations"] as? [[String: Any]] {
+            entries = configs.flatMap { $0["TestTargets"] as? [[String: Any]] ?? [] }
+        } else {
+            entries = plist.filter { !$0.key.hasPrefix("__") }.compactMap { $0.value as? [String: Any] }
+        }
+        return Set(entries.filter { $0["IsUITestBundle"] as? Bool == true }.compactMap { $0["BlueprintName"] as? String })
     }
 
     /// Every UI test target in the project, built or not.
@@ -70,22 +82,49 @@ enum UITestEngine {
         return out
     }
 
-    /// Test methods per class, from the sources (XCTestCase subclasses).
+    /// Test methods per class, from the sources. A class runs tests when its
+    /// chain of superclasses, declared in any file of the target, reaches
+    /// XCTestCase. Its tests are the `func test...()` methods in its body, in
+    /// `extension <Class>` blocks in any file, and in its superclasses, as
+    /// XCTest runs inherited tests. A class with no such method yields none.
     static func tests(in target: UITarget) -> [TestID] {
-        var out: [TestID] = []
+        let decl = #/^(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:public|open|internal|private|fileprivate|final)\s+)*/#
+        var superclass: [String: String] = [:]
+        var declared: [String] = []                // classes, in source order
+        var methods: [(type: String, name: String)] = []
         for file in target.sources {
             guard let text = try? String(contentsOfFile: file, encoding: .utf8) else { continue }
-            var cls: String?
+            var type: String?
             // Only what an iPhone simulator run would compile (see PlatformConditions).
             for line in PlatformConditions.activeLines(text) {
-                if let m = line.firstMatch(of: #/^(?:final\s+)?(?:@\w+\s+)*(?:final\s+)?class\s+(\w+)\s*:\s*XCTestCase\b/#) { cls = String(m.1) }
-                else if line.firstMatch(of: #/^(?:final\s+)?(?:public\s+)?(?:struct|class|enum|extension)\s/#) != nil { cls = nil }
-                if let c = cls, let m = line.firstMatch(of: #/^\s+(?:@\w+\s+)*func\s+(test\w*)\s*\(\s*\)/#) {
-                    out.append(TestID(target: target.name, cls: c, method: String(m.1)))
+                // A declaration at the top level, after its attributes and modifiers.
+                let rest = line.prefixMatch(of: decl).map { line[$0.range.upperBound...] } ?? line[...]
+                if let c = rest.firstMatch(of: #/^class\s+(\w+)\s*(?::\s*(?:\w+\.)?(\w+))?/#) {
+                    type = String(c.1)
+                    declared.append(String(c.1))
+                    if let s = c.2 { superclass[String(c.1)] = String(s) }
+                    continue
+                }
+                if let e = rest.firstMatch(of: #/^extension\s+(?:\w+\.)?(\w+)\b/#) { type = String(e.1); continue }
+                if rest.firstMatch(of: #/^(?:struct|enum|protocol|actor|func|var|let|typealias)\s/#) != nil { type = nil; continue }
+                if let t = type, let m = line.firstMatch(of: #/^\s+(?:@\w+\s+)*func\s+(test\w*)\s*\(\s*\)/#) {
+                    methods.append((t, String(m.1)))
                 }
             }
         }
-        return out
+        func ancestors(_ c: String) -> [String] {    // c first, up to XCTestCase; [] when it never gets there
+            var chain = [c]
+            while let s = superclass[chain.last!], chain.count < 64 {
+                if s == "XCTestCase" { return chain }
+                chain.append(s)
+            }
+            return []
+        }
+        var seen = Set<TestID>()
+        return declared.flatMap { c in
+            let chain = Set(ancestors(c))
+            return methods.filter { chain.contains($0.type) }.map { TestID(target: target.name, cls: c, method: $0.name) }
+        }.filter { seen.insert($0).inserted }
     }
 
     // MARK: - Build
@@ -216,7 +255,7 @@ enum UITestEngine {
         let t = now()
         let every = targets(ws, includingUnbuilt: true)
         let all = every.filter(\.built)
-        guard !all.isEmpty else { throw SimlessError("no UI test targets in the build (is the UI test target in the scheme?)") }
+        guard !all.isEmpty else { throw noTargetsError(ws) }
         let config = ws.config.tests
         let simulatorOnly = config?.simulatorOnly ?? [:]
         let skips = (config?.skip ?? []) + (args.repeated["--skip"] ?? []) + simulatorOnly.keys.sorted()
@@ -273,6 +312,7 @@ enum UITestEngine {
             let ids = asked.filter { !skipped($0) }
             excluded += asked.filter { skipped($0) && markedTests[$0.user] == nil }.map(\.user)
             if ids.isEmpty { continue }
+            Log.step("\(target.name): \(ids.count) UI test(s) selected from \(target.sources.count) source file(s)")
             bundles[target.name] = try build(target, ws: ws)
             selected += ids
         }
@@ -287,6 +327,13 @@ enum UITestEngine {
                 return true
             }
             if !named.isEmpty { throw SimlessError("\(named[0]) is in a UI test target the scheme doesn't build, so it can't run here") }
+            if filters.isEmpty && !excluded.isEmpty {
+                throw SimlessError("every UI test is skipped: \(excluded.count) by --skip or tests.skip")
+            }
+            if filters.isEmpty {
+                let files = all.map { "\($0.name) (\($0.sources.count) Swift file(s))" }.joined(separator: ", ")
+                throw SimlessError("found no test methods in \(files): simless looks for `func test...()` in classes that inherit from XCTestCase, and in extensions of them")
+            }
             throw SimlessError("no UI tests match \(filters.joined(separator: " "))")
         }
 
@@ -397,6 +444,18 @@ enum UITestEngine {
         if !ok, let note = SimulatorBranches.note(ws) { print("  \(note)") }
         print("\(ok ? "PASSED" : "FAILED") in \(secs(t)) (screenshots of failures and logs: \(artifacts))")
         return ok
+    }
+
+    /// Why no UI test target can run: none is in the build, or simless found
+    /// no sources for the ones that are.
+    static func noTargetsError(_ ws: Workspace) -> SimlessError {
+        let names = builtTargetNames(ws).sorted()
+        guard let first = names.first else { return SimlessError("no UI test targets in the build (is the UI test target in the scheme?)") }
+        let project = ws.config.project
+        return SimlessError("no UI test sources found for \(names.joined(separator: ", ")): \(names.count == 1 ? "it has" : "they have") "
+            + "no synchronized folder and no Swift file in the Sources build phase in \(project), and no folder \(ws.projectDir)/\(first); "
+            + "set tests.uiSources in .simless.json to its folder, relative to the repository: "
+            + "{\"tests\": {\"uiSources\": {\"\(first)\": \"<folder>\"}}}")
     }
 
     /// UI hosts are light (about 1.5 GB each) and mostly wait on the app, so up to
