@@ -75,7 +75,7 @@ The variable is set only for a build without the kit, so one server listens on t
 
 `SimlessKit.swift` is a single `#if SIMLESS` file that older `simless init` runs added to the app, with a call to `SimlessHost.startIfRequested()` in the App's `init()`. `simless init` now writes only `.simless.json`, and removes the kit and that call when each is as simless wrote it and no other code names `SimlessHost`; otherwise it changes no app file and lists each line. It does nothing unless the app is launched with `--simless-port`. When it is, it:
 
-- **Hides the app** whenever simless launched it (`SIMLESS_HEADLESS=1`), as SimlessRuntime does too (below).
+- **Hides the app** when it has `--simless-port` or `SIMLESS_HEADLESS=1` and `isiOSAppOnMac` is true. A native host reports `isiOSAppOnMac` as true too, because SimlessRuntime makes it so before the app's code runs. SimlessRuntime hides the app as well (below).
 - **Turns on accessibility automation** in-process (`_AXSSetAutomationEnabled`, the approach KIF uses), so SwiftUI vends its accessibility tree.
 - **Calls `simlessFixtures(_:)`**, which the app owns, to register screens.
 - **Opens the sandbox a little,** in every run simless starts. It consumes the read-only sandbox extensions simless issued for the repository (`sandbox_extension_issue_file` / `_consume`, the mechanism behind file panels), so tests and fixtures can read repository files. It also points `containerURL(forSecurityApplicationGroupIdentifier:)` at a private folder per group inside the slot's container, because the slot can't hold app-group entitlements.
@@ -86,15 +86,17 @@ The variable is set only for a build without the kit, so one server listens on t
 - as AppKit loads, before any window exists, it makes AppKit's window-ordering calls no-ops.
 - on the first turn of the main queue, and each time a window becomes visible, it sets the `NSApplication` activation policy to *prohibited*, calls `hide:`, and makes each window transparent and click-through, all through the ObjC runtime.
 
-It does so when the host carries `SIMLESS_HEADLESS=1` or `SIMLESS_UI=1`, and logs `simless-runtime: headless`. Each launch gets the runtime and one of the two variables:
+It does so when the host carries `SIMLESS_HEADLESS=1` or `SIMLESS_UI=1`, and logs `simless-runtime: headless`. It has no `isiOSAppOnMac` check. A window that is never ordered in may never become the key window, so a unit test that needs a key window or a first responder can fail without the kit. The kit did the same. Each launch gets the runtime and one of the two variables. The `open` and `posix_spawn` launches set `DYLD_INSERT_LIBRARIES` only when the slot has its copy of the runtime (`SimlessRuntime.dylib`). `simless up` and each relaunch put that copy in place first. The install run's `slot.xctestrun` names the copy without that check, and `Slots.prepare` puts the copy in place before the install:
 
 | Launch | How simless starts it | Runtime from | Variable |
 | --- | --- | --- | --- |
 | Render host | `open --env` (dfi), `posix_spawn` (native) | `DYLD_INSERT_LIBRARIES` | `SIMLESS_HEADLESS` |
 | Unit and package test host, standby host | `open --env` (dfi), `posix_spawn` (native) | `DYLD_INSERT_LIBRARIES` | `SIMLESS_HEADLESS` |
 | UI test host | the runtime's shim in the `xctest` runner | `DYLD_INSERT_LIBRARIES` | `SIMLESS_UI` |
-| Install run (dfi only) | `xcodebuild test-without-building` on `slot.xctestrun` | `DYLD_INSERT_LIBRARIES` in the app-hosted target's `TestingEnvironmentVariables`, after xcodebuild's own libraries | `SIMLESS_HEADLESS` in `EnvironmentVariables` |
+| Install run (dfi only) | `xcodebuild test-without-building` on `slot.xctestrun` | `DYLD_INSERT_LIBRARIES` in the app-hosted target's `TestingEnvironmentVariables`, after xcodebuild's own libraries. `Slots.install` writes this into the file again before each run, so a file from an older simless gets it too | `SIMLESS_HEADLESS` in `EnvironmentVariables` |
 | Wipe of a slot's data | `open --env` | `DYLD_INSERT_LIBRARIES` | none: the runtime exits before the app's code runs |
+
+For the install run, `Slots.install` listens on a loopback port that the OS picks and puts it in `SIMLESS_INSTALL_REPORT`. The runtime, when it hides the app, sends `headless` there. Without the kit, an install with no such report fails, and the error names the `.xctestrun` injection. With the kit, the kit hides the app, so the install passes without the report, as before.
 
 With the kit, the kit hides the app as well, in the same way. Slots are also `LSUIElement` and `LSBackgroundOnly`. Measured result, with the kit: no window, Dock icon or focus change, sampled every 10 ms. `simless calibrate` runs in a simulator and is not in the table.
 

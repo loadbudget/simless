@@ -3,8 +3,6 @@
 
 import Foundation
 
-let version = "0.7.2"
-
 let usage = """
 simless: fast, headless, simulator-free SwiftUI checks for AI agents.
 

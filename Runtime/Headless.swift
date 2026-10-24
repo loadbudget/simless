@@ -22,6 +22,23 @@ enum Headless {
         NotificationCenter.default.addObserver(forName: NSNotification.Name("UIWindowDidBecomeVisibleNotification"), object: nil, queue: .main) { _ in hide() }
     }
 
+    /// Sends "headless" to simless on 127.0.0.1:`port`. Nothing waits for an
+    /// answer, and a refused connection changes nothing in the app.
+    static func report(port: UInt16) {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return }
+        defer { close(fd) }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = in_port_t(port.bigEndian)
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let connected = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+        }
+        guard connected == 0 else { return runtimeLog("could not report to simless on port \(port)") }
+        _ = "headless\n".withCString { write(fd, $0, strlen($0)) }
+    }
+
     static func tryInstall() {
         guard !done, NSClassFromString("NSWindow") != nil else { return }
         done = true

@@ -69,7 +69,11 @@ public func simlessRuntimeStart() {
     if env["SIMLESS_UI"] != "1", let canvas = env["SIMLESS_UNIT_CANVAS"] { UnitCanvas.install(canvas) }
     // Every host simless launches stays out of sight: the render, unit test
     // and install runs carry SIMLESS_HEADLESS, UI test hosts SIMLESS_UI.
-    if env["SIMLESS_HEADLESS"] == "1" || env["SIMLESS_UI"] == "1" { Headless.install() }
+    if env["SIMLESS_HEADLESS"] == "1" || env["SIMLESS_UI"] == "1" {
+        Headless.install()
+        // The install run: tell simless that the runtime loaded and hides the app.
+        if let port = env["SIMLESS_INSTALL_REPORT"].flatMap({ UInt16($0) }) { Headless.report(port: port) }
+    }
     if env["SIMLESS_UI"] == "1" {
         // An iPhone supports a watch session; asked at startup, so set it now.
         if (env["SIMLESS_UI_CANVAS"] ?? "").split(separator: ",").first.flatMap({ Double($0) }).map({ $0 < 600 }) ?? true {

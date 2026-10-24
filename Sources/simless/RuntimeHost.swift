@@ -60,10 +60,16 @@ enum RuntimeHost {
 
     /// Copies `dylib`, a runtime of the current build, into the slot with the
     /// module of that build, and records the build.
+    /// The rename replaces the slot's copy in one step, so a launch (or an
+    /// install run) that starts meanwhile inserts the old file or the new one.
     static func installRuntime(_ slot: SlotRecord, dylib: String) throws {
         let copy = "\(slot.dir)/SimlessRuntime.dylib"
-        try? FileManager.default.removeItem(atPath: copy)
-        try FileManager.default.copyItem(atPath: dylib, toPath: copy)
+        let tmp = "\(slot.dir)/.\(UUID().uuidString).dylib"
+        try FileManager.default.copyItem(atPath: dylib, toPath: tmp)
+        guard rename(tmp, copy) == 0 else {
+            try? FileManager.default.removeItem(atPath: tmp)
+            throw SimlessError("could not place SimlessRuntime.dylib in \(slot.slotID): \(String(cString: strerror(errno)))")
+        }
         let build = try RuntimeBuild.moduleDir()
         try installModule(slot, build: build)
         try recordInjected(slot, build: build)
