@@ -275,10 +275,22 @@ enum SimlessHost {
     /// headless, so the window shows on no screen. In a simulator (`simless calibrate`) it goes on top, so the
     /// device's own safe areas and traits apply. The scene may connect after
     /// the host starts, hence the lazy creation.
+    ///
+    /// On the Mac with no login session (SSH, a LaunchDaemon) no scene ever
+    /// connects, and a window with no scene still lays SwiftUI out. It is made
+    /// through `NSObject.Type`, whose `init()` carries no deprecation, so the
+    /// deprecated `UIWindow()` isn't named.
     private static func renderWindow() -> UIWindow? {
         if let window { return window }
-        guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first else { return nil }
-        let w = UIWindow(windowScene: scene)
+        let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first
+        let w: UIWindow
+        if let scene {
+            w = UIWindow(windowScene: scene)
+        } else if ProcessInfo.processInfo.isiOSAppOnMac {
+            w = (UIWindow.self as NSObject.Type).init() as! UIWindow
+        } else {
+            return nil
+        }
         w.frame = CGRect(x: 0, y: 0, width: 402, height: 874)
         if ProcessInfo.processInfo.isiOSAppOnMac {
             w.isHidden = false

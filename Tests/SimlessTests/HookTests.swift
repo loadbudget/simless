@@ -58,4 +58,17 @@ final class HookTests: XCTestCase {
         XCTAssertEqual(try String(contentsOfFile: path, encoding: .utf8),
                        app("        #if SIMLESS\n        SimlessHost.startIfRequested()\n        #endif"))
     }
+
+    func fixtures(_ guardLine: String) -> String {
+        "// Fixtures for `simless render`.\n\(guardLine)\nimport SwiftUI\n\n@MainActor\nfunc simlessFixtures(_ r: SimlessRegistry) {\n    #if DEBUG && os(iOS)\n    r.add(\"Debug\") { Text(\"debug\") }\n    #endif\n}\n#endif\n"
+    }
+
+    func testMovesTheFixturesFileFromTheOldGuard() throws {
+        let path = "\(dir)/SimlessFixtures.swift"
+        try fixtures("#if DEBUG && os(iOS)").write(toFile: path, atomically: true, encoding: .utf8)
+        XCTAssertTrue(try moveOldGuard(in: path, followedBy: .fixtures))
+        // A guard of the user's own, inside the function, stays.
+        XCTAssertEqual(try String(contentsOfFile: path, encoding: .utf8), fixtures("#if SIMLESS"))
+        XCTAssertFalse(try moveOldGuard(in: path, followedBy: .fixtures))
+    }
 }
