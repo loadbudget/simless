@@ -106,6 +106,31 @@ final class PreviewsTests: XCTestCase {
         XCTAssertFalse(g.texts["NoteRow.swift"]!.contains("NoteRow.Short"))
     }
 
+    func testAFailedRoundLeavesOutThePreviewAndCompilesAgain() throws {
+        var compiled = 0
+        let m = try Previews.compileLeavingOut(input()) { _, _ in
+            compiled += 1
+            if compiled == 1 { throw SimlessError("patch compile failed\nNoteRow.swift:11:5: error: cannot find 'sample' in scope") }
+            return "/tmp/previews.dylib"
+        }
+        XCTAssertEqual(compiled, 2)
+        XCTAssertEqual(m.dylib, "/tmp/previews.dylib")
+        XCTAssertEqual(m.entries.first { $0.name == "NoteRow.Short" }?.skipped,
+                       "doesn't compile outside Xcode's previews: cannot find 'sample' in scope")
+    }
+
+    func testPreviewsThatStillFailAfterTheLastRoundThrow() {
+        let lines = [11, 16]
+        var compiled = 0
+        XCTAssertThrowsError(try Previews.compileLeavingOut(input(), rounds: 2) { _, _ in
+            defer { compiled += 1 }
+            throw SimlessError("patch compile failed\nNoteRow.swift:\(lines[compiled]):5: error: no such module 'WatchKit'")
+        }) { error in
+            XCTAssertEqual("\(error)", "previews still don't compile after 2 rounds (2 left out so far); NoteRow.swift:16:5: error: no such module 'WatchKit'")
+        }
+        XCTAssertEqual(compiled, 2)
+    }
+
     func testOnlyGeneratesWhatsAsked() {
         let g = Previews.generate(input(), skip: [:], only: ["NoteRow.2"])
         XCTAssertEqual(g.entries.map(\.name), ["NoteRow.2"])

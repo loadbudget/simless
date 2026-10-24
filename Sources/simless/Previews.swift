@@ -336,24 +336,33 @@ enum Previews {
         try mkdirp(d)
         var input = PatchScope.input(ws: ws, edited: [])
         input.sources = input.sources.filter { $0.value.contains("#Preview") || $0.value.contains("PreviewProvider") || $0.value.contains("@main") }
+        let m = try compileLeavingOut(input) { gen, prelude in
+            try Patch.compile(ws: ws, slot: slot, settings: settings, files: gen.texts.keys.sorted(), texts: gen.texts,
+                              name: "SimlessPreviews", dir: d, prelude: prelude, entry: "        simlessRegisterPreviews(r)")
+        }
+        try save(ws, m)
+        if m.dylib != nil {
+            let made = m.entries.filter { $0.skipped == nil }.count
+            Log.step("previews: \(made) fixture(s) from #Preview\(m.entries.contains { $0.name == "root" } ? " and the App" : "") in \(secs(t))")
+        }
+        return m
+    }
+
+    /// Compiles the generated previews with `compile`, which gets them and the
+    /// prelude and returns the library. Each failed round leaves out the
+    /// previews its errors are in; a round that still fails after `rounds`
+    /// throws rather than return a manifest without a library.
+    static func compileLeavingOut(_ input: PatchScope.Input, rounds: Int = 5,
+                                  compile: (Generated, String) throws -> String) throws -> Manifest {
         var skip: [String: String] = [:]
-        for _ in 0..<4 {
+        var lastError: SimlessError?
+        for _ in 0..<rounds {
             let gen = generate(input, skip: skip)
-            guard !gen.calls.isEmpty else {
-                let m = Manifest(dylib: nil, entries: gen.entries)
-                try save(ws, m)
-                return m
-            }
+            guard !gen.calls.isEmpty else { return Manifest(dylib: nil, entries: gen.entries) }
             let calls = gen.calls.map { "    \($0)(r)" }.joined(separator: "\n")
             let prelude = helpers + "\n" + registrations + "\n\n@MainActor func simlessRegisterPreviews(_ r: SimlessRegistry) {\n\(calls)\n}\n"
             do {
-                let dylib = try Patch.compile(ws: ws, slot: slot, settings: settings, files: gen.texts.keys.sorted(), texts: gen.texts,
-                                              name: "SimlessPreviews", dir: d, prelude: prelude, entry: "        simlessRegisterPreviews(r)")
-                let m = Manifest(dylib: dylib, entries: gen.entries)
-                try save(ws, m)
-                let made = m.entries.filter { $0.skipped == nil }.count
-                Log.step("previews: \(made) fixture(s) from #Preview\(gen.entries.contains { $0.name == "root" } ? " and the App" : "") in \(secs(t))")
-                return m
+                return Manifest(dylib: try compile(gen, prelude), entries: gen.entries)
             } catch let error as SimlessError where error.description.hasPrefix("patch compile failed") {
                 // Leave out the previews the errors are in; an error elsewhere in
                 // a file (a helper it keeps) leaves out the file's previews.
@@ -371,11 +380,13 @@ enum Previews {
                     }
                 }
                 if blamed == 0 { throw error }
+                lastError = error
             }
         }
-        let m = Manifest(dylib: nil, entries: generate(input, skip: skip).entries)
-        try save(ws, m)
-        return m
+        // A manifest without a library would load nothing, silently, while the
+        // summary still counted every preview not left out.
+        let firstError = lastError?.description.split(separator: "\n").first { $0.contains("error:") } ?? ""
+        throw SimlessError("previews still don't compile after \(rounds) rounds (\(skip.count) left out so far); \(firstError.trimmingCharacters(in: .whitespaces))")
     }
 
     /// For a hot reload that renders previews: their files as the patch
