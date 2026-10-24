@@ -87,14 +87,18 @@ enum Previews {
     struct Generated {
         var texts: [String: String] = [:]   // file -> what the dylib compiles of it
         var entries: [Entry] = []
-        var keys: [Key] = []                // each entry's, by index
         var calls: [String] = []            // registration functions, in order
         var ranges: [String: [(entry: Int, lines: ClosedRange<Int>)]] = [:]
     }
 
-    /// A preview or root by its file and its name before `generate` makes it
-    /// distinct: what a compile error leaves out, so an error in one file never
-    /// leaves out an entry of another.
+    /// Two entries whose names stay the same after each takes its file's name:
+    /// `simless up` stops on it, with or without the kit.
+    struct NameClash: Error, CustomStringConvertible {
+        let description: String
+    }
+
+    /// A preview or root by its file and its name: what a compile error
+    /// leaves out, so an error in one file never leaves out an entry of another.
     struct Key: Hashable {
         var file: String
         var name: String
@@ -104,12 +108,13 @@ enum Previews {
     /// `skip`, or only for `only`, keeping `keepAlso`'s chunks of each file too.
     ///
     /// Names: `root` for a `@main` App, `<File>.<preview name or number>` for a
-    /// preview. Of the entries that compile, the first with a name keeps it, as
-    /// the first `root` did, and each later one gets the lowest `.<n>` from 2 up
-    /// that no entry has (`root.2`, `LoginView.Error.2`). Files with `@main` come
-    /// first, then by path. An entry left out keeps its name, and registers none.
+    /// preview. When two or more entries the scan finds share a name, each one
+    /// is `<File>.<name>` (`DemoApp.root`, `DemoWatchApp.root`). This counts
+    /// every entry, whether it compiles or not, so a name never changes when
+    /// another entry starts or stops compiling. When names still collide (one
+    /// file name in two folders), it throws, naming both files.
     static func generate(_ input: PatchScope.Input, skip: [Key: String], only: Set<String>? = nil,
-                         keepAlso: [String: Set<Int>] = [:]) -> Generated {
+                         keepAlso: [String: Set<Int>] = [:]) throws -> Generated {
         let g = PatchScope.graph(input)
         var out = Generated()
         // The App's file first, so `root` comes before the previews.
@@ -119,18 +124,17 @@ enum Previews {
         }
         struct Found {
             var entry: Entry
-            var key: Key
+            var base: String
             var chunk: Int
             var span: ClosedRange<Int>
             var fn: String
             var make: (String) -> Result<String, SimlessError>
-            var made: Result<String, SimlessError>
+            var made: Result<String, SimlessError> = .failure(SimlessError(""))
         }
         var found: [Found] = []
         for file in files {
             guard let text = input.sources[file], let cs = g.chunksByFile[file] else { continue }
             let base = ((file as NSString).lastPathComponent as NSString).deletingPathExtension
-            let inPackage = input.moduleOf[file].map { $0 != input.appModule } == true
             var number = 0
             for (i, c) in cs.enumerated() {
                 let isPreview = c.kind == .preview || (c.kind == .type && c.inherits.contains("PreviewProvider"))
@@ -152,26 +156,26 @@ enum Previews {
                     name = "\(base).\(previewLabel(c.text) ?? String(number))"
                     make = { preview(c.text, name: $0, fn: fn) }
                 }
-                let made: Result<String, SimlessError> =
-                    inPackage ? .failure(SimlessError("it's in a local package; only the app target's previews are generated"))
-                    : skip[Key(file: file, name: name)].map { .failure(SimlessError($0)) } ?? make(name)
-                found.append(Found(entry: Entry(name: name, file: file, line: line), key: Key(file: file, name: name), chunk: i, span: span, fn: fn, make: make, made: made))
+                found.append(Found(entry: Entry(name: name, file: file, line: line), base: base, chunk: i, span: span, fn: fn, make: make))
             }
         }
-        // A later entry that compiles with a name taken gets a distinct one.
-        let names = Set(found.map(\.entry.name))
-        var given: [String: Int] = [:]
-        var taken = Set<String>()
+        // A name that two or more entries share gets each one's file name.
+        let counts = Dictionary(found.map { ($0.entry.name, 1) }, uniquingKeysWith: +)
+        for i in found.indices where counts[found[i].entry.name]! > 1 {
+            found[i].entry.name = "\(found[i].base).\(found[i].entry.name)"
+        }
+        var seen: [String: String] = [:]
+        for f in found {
+            if let other = seen[f.entry.name] {
+                throw NameClash(description: "\(other) and \(f.entry.file) both give a fixture named \(f.entry.name); rename one preview, or one of the files")
+            }
+            seen[f.entry.name] = f.entry.file
+        }
         for i in found.indices {
-            guard case .success = found[i].made else { continue }
-            let name = found[i].entry.name
-            given[name, default: 0] += 1
-            guard given[name]! > 1 else { taken.insert(name); continue }
-            var n = given[name]!
-            while names.contains("\(name).\(n)") || taken.contains("\(name).\(n)") { n += 1 }
-            found[i].entry.name = "\(name).\(n)"
-            found[i].made = found[i].make(found[i].entry.name)
-            taken.insert(found[i].entry.name)
+            let f = found[i]
+            found[i].made = input.moduleOf[f.entry.file].map({ $0 != input.appModule }) == true
+                ? .failure(SimlessError("it's in a local package; only the app target's previews are generated"))
+                : skip[Key(file: f.entry.file, name: f.entry.name)].map { .failure(SimlessError($0)) } ?? f.make(f.entry.name)
         }
         for file in files {
             guard let text = input.sources[file], let cs = g.chunksByFile[file], let keys = g.nodeOf[file], let first = cs.first else { continue }
@@ -188,7 +192,6 @@ enum Previews {
                     entry.skipped = why.description
                 }
                 out.entries.append(entry)
-                out.keys.append(f.key)
             }
             guard !replaced.isEmpty else { continue }
             // The file's private declarations the generated code uses stay; the
@@ -423,11 +426,12 @@ enum Previews {
             let calls = gen.calls.map { "    \($0)(r)" }.joined(separator: "\n")
             return helpers + "\n" + registrations + "\n\n@MainActor func simlessRegisterPreviews(_ r: SimlessRegistry) {\n\(calls)\n}\n"
         }
+        func key(_ e: Entry) -> Key { Key(file: e.file, name: e.name) }
         func firstError(_ error: SimlessError?) -> String {
             (error?.description.split(separator: "\n").first { $0.contains("error:") } ?? "").trimmingCharacters(in: .whitespaces)
         }
         for _ in 0..<rounds {
-            let gen = generate(input, skip: skip)
+            let gen = try generate(input, skip: skip)
             guard !gen.calls.isEmpty || alwaysBuild else { return Manifest(dylib: nil, entries: gen.entries) }
             do {
                 return Manifest(dylib: try compile(gen, prelude(gen)), entries: gen.entries)
@@ -442,8 +446,8 @@ enum Previews {
                     let message = parts[4].trimmingCharacters(in: .whitespaces)
                     let inFile = gen.ranges[file] ?? []
                     let hit = inFile.filter { $0.lines.contains(n) }
-                    for (e, _) in hit.isEmpty ? inFile : hit where skip[gen.keys[e]] == nil {
-                        skip[gen.keys[e]] = "doesn't compile outside Xcode's previews: \(message)"
+                    for (e, _) in hit.isEmpty ? inFile : hit where skip[key(gen.entries[e])] == nil {
+                        skip[key(gen.entries[e])] = "doesn't compile outside Xcode's previews: \(message)"
                         blamed += 1
                     }
                 }
@@ -452,7 +456,7 @@ enum Previews {
             }
         }
         // The last round can leave out every preview that remained.
-        let gen = generate(input, skip: skip)
+        let gen = try generate(input, skip: skip)
         guard !gen.calls.isEmpty else {
             guard alwaysBuild else { return Manifest(dylib: nil, entries: gen.entries) }
             // A build without the kit has its fixtures only in this library:
@@ -472,11 +476,11 @@ enum Previews {
     /// compiles them (with what the patch keeps of them anyway), and the
     /// registrations to run after the build's. It generates from every file the
     /// build did, with what the build left out, so each name is the build's.
-    static func patchCode(ws: Workspace, names: [String], kept: [String: Set<Int>], texts: [String: String])
+    static func patchCode(ws: Workspace, names: [String], kept: [String: Set<Int>], texts: [String: String]) throws
         -> (texts: [String: String], prelude: String, entry: String) {
         let skip = Dictionary((manifest(ws)?.entries ?? []).compactMap { e in e.skipped.map { (Key(file: e.file, name: e.name), $0) } },
                               uniquingKeysWith: { a, _ in a })
-        let gen = generate(input(ws), skip: skip, only: Set(names), keepAlso: kept)
+        let gen = try generate(input(ws), skip: skip, only: Set(names), keepAlso: kept)
         let calls = gen.calls.map { "        \($0)(r)" }.joined(separator: "\n")
         return (texts.merging(gen.texts) { $1 }, helpers, Patch.registerPreviews + "\n" + calls)
     }
