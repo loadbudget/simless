@@ -319,14 +319,34 @@ enum Render {
 
 /// What macOS's crash report says about a host that died.
 enum CrashReport {
+    /// Where macOS writes its crash reports.
+    static let reportsDir = "\(Paths.home)/Library/Logs/DiagnosticReports"
+    /// Seconds to look for the report before the host's log answers instead.
+    static let reportWait: Double = 4
+    /// Seconds after the first look to keep looking when the log has no
+    /// answer. macOS once wrote a report 52 s after the crash.
+    static let lateReportWait: Double = 90
+
     /// The exception and the first frames in the app or SwiftUI, from the
-    /// newest report for `slot` written after `since`. Reports appear a few
-    /// seconds after the crash.
-    static func summary(slot: SlotRecord, since: Date, wait: Double = 4) -> String? {
+    /// newest report for `slot` written after `since`. Reports appear seconds
+    /// after the crash, or a minute: without one in `wait`, the trap or the
+    /// frames in the host's log answer, and without those it looks until
+    /// `lateWait` after the first look.
+    static func summary(slot: SlotRecord, since: Date, wait: Double = reportWait, lateWait: Double = lateReportWait, dir: String = reportsDir) -> String? {
         lastSymbols = []
-        let dir = "\(Paths.home)/Library/Logs/DiagnosticReports"
-        let deadline = now() + wait
-        repeat {
+        let start = now()
+        if let report = report(slot: slot, since: since, dir: dir, until: start + wait) { return report }
+        if let trap = hostTrap(slot) { return trap + " (no crash report from macOS this time)" }
+        if let frames = handlerFrames(slot) { return frames }
+        Log.step("waiting up to \(Int(lateWait - (now() - start))) s for macOS's crash report of \(slot.slotID)")
+        return report(slot: slot, since: since, dir: dir, until: start + lateWait)
+            ?? "the host process died, and macOS wrote no crash report within \(Int(lateWait)) s; run it in a simulator to see the crash"
+    }
+
+    /// The newest report for `slot` in `dir` written after `since`, looked
+    /// for every half second until `deadline`, and once at it.
+    private static func report(slot: SlotRecord, since: Date, dir: String, until deadline: Double) -> String? {
+        while true {
             let files = ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []).filter { $0.hasSuffix(".ips") }
                 .map { "\(dir)/\($0)" }
                 .filter { (try? FileManager.default.attributesOfItem(atPath: $0)[.creationDate] as? Date).map { $0 >= since } ?? false }
@@ -338,11 +358,10 @@ enum CrashReport {
                 else { continue }
                 return describe(body) + " (report: \(path))"
             }
-            Thread.sleep(forTimeInterval: 0.5)
-        } while now() < deadline
-        if let trap = hostTrap(slot) { return trap + " (no crash report from macOS this time)" }
-        if let frames = handlerFrames(slot) { return frames }
-        return "the host process died, and macOS wrote no crash report this time (it limits repeated ones); run it in a simulator to see the crash"
+            let left = deadline - now()
+            if left <= 0 { return nil }
+            Thread.sleep(forTimeInterval: min(0.5, left))
+        }
     }
 
     /// The crashed thread's top frames as SimlessRuntime's crash handler
