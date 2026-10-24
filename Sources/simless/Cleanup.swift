@@ -163,9 +163,11 @@ enum Cleanup {
             + folders.filter { !named.contains($0) }.map { (slot: nil, dir: "\(legacySlots)/\($0)") }
     }
 
-    /// Removes, once, the slots of the old layout, where one `state.json` and
-    /// one `slots/` folder held every worktree's. Under the old "state" lock,
-    /// so an older simless running now doesn't write them meanwhile.
+    /// Removes the slots of the old layout, where one `state.json` and one
+    /// `slots/` folder held every worktree's. Under the old "state" lock, so an
+    /// older simless doesn't write them during the removal. An older simless
+    /// that runs later writes them again, and the next command here removes
+    /// its slots again, so every simless on a Mac updates together.
     static func migrateLegacyState() {
         guard exists(Paths.legacyStatePath) || exists(Paths.legacySlots) else { return }
         _ = try? withLock("state") {
@@ -301,9 +303,9 @@ enum Cleanup {
             print("removed all simless hosts, slots and caches (\(Paths.cache))")
         } else {
             let ws = try Workspace.load()
-            let settings = try? ws.settings()
-            // The render slot and its test and UI-test siblings.
-            for slot in GlobalState.load(worktree: ws.root).slots where settings.map({ $0.bundleID == slot.bundleBase }) ?? false && slot.worktree == ws.root {
+            // Every slot of the worktree, an old bundle id's too: deleting the
+            // work folder below deletes their records and folders.
+            for slot in GlobalState.load(worktree: ws.root).slots {
                 removeSlot(slot)
                 try GlobalState.release(slot)
             }

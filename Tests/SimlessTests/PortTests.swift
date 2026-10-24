@@ -12,8 +12,12 @@ final class PortTests: XCTestCase {
     }
 
     func testAPortAStoppedHostHoldsIsNotGiven() throws {
-        let first = try freePort()
-        XCTAssertNotEqual(try freePort(avoiding: [first]), first)
+        var given = [47800, 47800, 51234].makeIterator()
+        XCTAssertEqual(try freePort(avoiding: [47800]) { given.next()! }, 51234)
+    }
+
+    func testAnOSThatGivesOnlyHeldPortsIsRefused() {
+        XCTAssertThrowsError(try freePort(avoiding: [47800]) { 47800 })
     }
 
     /// A stopped host's port that another program took since.
@@ -26,5 +30,16 @@ final class PortTests: XCTestCase {
         XCTAssertEqual(slot.port, 51234)
         XCTAssertEqual(state.slots.map(\.port), [51234])
         XCTAssertTrue(replaced.isEmpty)
+    }
+
+    /// Another worktree's stopped host listens on its port again when it starts.
+    func testANewPortAvoidsTheOtherWorktreesPorts() throws {
+        let other = "/Users/dev/worktrees/app-b"
+        let others = [SlotRecord(bundleBase: "com.example.notes", n: slotNumber(forWorktree: other), worktree: other, port: 50001)]
+        var state = GlobalState()
+        var avoided: Set<Int> = []
+        _ = try state.assign(bundleBase: "com.example.notes", worktree: "/Users/dev/worktrees/app-a", kind: nil,
+                             others: others) { used in avoided = used; return 51234 }
+        XCTAssertEqual(avoided, [50001])
     }
 }
