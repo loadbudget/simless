@@ -206,8 +206,9 @@ enum Patch {
         let packageFrameworks = "\(ws.productsIphoneos)/PackageFrameworks"
         if exists(packageFrameworks) { args += ["-F", packageFrameworks] }
         if !kitInApp {
-            if !exists(RuntimeHost.module(slot)) { try RuntimeHost.installModule(slot) }
-            args += ["-I", RuntimeHost.moduleDir(slot)]
+            // The module of the runtime the slot injects: a copy from an older
+            // build, or no copy yet, would bind the dylib to the wrong runtime.
+            args += ["-I", try RuntimeHost.currentModule(slot)]
         }
         if let iso = effective.isolation { args += ["-default-isolation", iso] }
         for f in effective.features { args += ["-enable-upcoming-feature", f] }

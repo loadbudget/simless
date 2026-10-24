@@ -40,8 +40,8 @@ enum RuntimeHost {
             try? FileManager.default.removeItem(atPath: copy)
             try FileManager.default.copyItem(atPath: runtime, toPath: copy)
             try installModule(slot)
-        } else if !exists(module(slot)) {
-            try installModule(slot)
+        } else {
+            _ = try currentModule(slot)
         }
     }
 
@@ -50,19 +50,33 @@ enum RuntimeHost {
     /// compiled against it binds to that runtime.
     static func moduleDir(_ slot: SlotRecord) -> String { "\(slot.dir)/runtime-module" }
     static func module(_ slot: SlotRecord) -> String { "\(moduleDir(slot))/SimlessRuntime.swiftmodule" }
+    /// The runtime build folder the slot's module copy came from.
+    static func moduleBuild(_ slot: SlotRecord) -> String { "\(moduleDir(slot))/build.txt" }
 
-    /// Copies the module of the current runtime build into the slot. The
-    /// rename replaces it in one step, so a compile that reads it meanwhile
-    /// reads the old file or the new one.
+    /// Copies the module of the current runtime build into the slot, and
+    /// records which build it is. The rename replaces it in one step, so a
+    /// compile that reads it meanwhile reads the old file or the new one.
     static func installModule(_ slot: SlotRecord) throws {
-        let source = "\(try RuntimeBuild.moduleDir())/SimlessRuntime.swiftmodule"
+        let build = try RuntimeBuild.moduleDir()
         try mkdirp(moduleDir(slot))
         let tmp = "\(moduleDir(slot))/.\(UUID().uuidString).swiftmodule"
-        try FileManager.default.copyItem(atPath: source, toPath: tmp)
+        try FileManager.default.copyItem(atPath: "\(build)/SimlessRuntime.swiftmodule", toPath: tmp)
         guard rename(tmp, module(slot)) == 0 else {
             try? FileManager.default.removeItem(atPath: tmp)
             throw SimlessError("could not place SimlessRuntime.swiftmodule in \(slot.slotID): \(String(cString: strerror(errno)))")
         }
+        try build.write(toFile: moduleBuild(slot), atomically: true, encoding: .utf8)
+    }
+
+    /// The slot's module copy, from the runtime build that the slot injects
+    /// next. Waits for that build when it is running, and copies its module
+    /// when the slot has none, or one from another build.
+    static func currentModule(_ slot: SlotRecord) throws -> String {
+        let build = try RuntimeBuild.moduleDir()
+        if !exists(module(slot)) || (try? String(contentsOfFile: moduleBuild(slot), encoding: .utf8)) != build {
+            try installModule(slot)
+        }
+        return moduleDir(slot)
     }
 
     static func installedApp(_ slot: SlotRecord) throws -> String {
