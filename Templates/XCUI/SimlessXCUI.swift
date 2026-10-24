@@ -1109,6 +1109,43 @@ final class XCUIApplication: XCUIElement {
         return super.descendants(matching: type)
     }
 
+    // MARK: Protected resources
+
+    /// Makes the app ask again for `resource` the next time it uses it.
+    ///
+    /// By default SimlessRuntime answers every permission request itself, on
+    /// each launch, and stores no answer between launches, so the reset
+    /// changes nothing.
+    ///
+    /// With `SIMLESS_PERMISSIONS=ask` the requests reach macOS, which keeps
+    /// the answers in its TCC store by the slot's bundle id. The reset runs
+    /// `tccutil reset <service> <slot bundle id>` for the resource's TCC
+    /// service. Location, health, a keyboard's network access and the local
+    /// network have no TCC service that `tccutil` resets on macOS: it refuses
+    /// `Location`, `Health`, `HealthKit`, `KeyboardNetwork` and `LocalNetwork`.
+    /// So for those the reset does nothing, and the test runs on with the
+    /// answer the earlier launches left.
+    @available(iOS 13.4, *)
+    @MainActor @preconcurrency
+    func resetAuthorizationStatus(for resource: XCUIProtectedResource) {
+        guard host.env["SIMLESS_PERMISSIONS"] == "ask", let service = resource.tccService else { return }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+        p.arguments = ["reset", service, host.slotID]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = out
+        do { try p.run() } catch {
+            XCTFail("resetAuthorizationStatus(for: \(resource)): could not run tccutil: \(error)")
+            return
+        }
+        let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        p.waitUntilExit()
+        if p.terminationStatus != 0 {
+            XCTFail("resetAuthorizationStatus(for: \(resource)): tccutil reset \(service) \(host.slotID) failed: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+    }
+
     // MARK: Accessibility audit
 
     func performAccessibilityAudit(for auditTypes: XCUIAccessibilityAuditType = .all,
@@ -1153,6 +1190,48 @@ final class StatusBarQuery: XCUIElementQuery {
         let c = SimlessUIHost.shared.canvas
         let frame: [Double] = [0, 0, c.first ?? 402, c.count > 2 ? c[2] : 62]
         return [Node(-2, ["type": Int(XCUIElement.ElementType.statusBar.rawValue), "frame": frame, "hittable": true])]
+    }
+}
+
+@available(iOS 13.4, *)
+enum XCUIProtectedResource: Int, @unchecked Sendable {
+    case contacts = 1
+    case calendar = 2
+    case reminders = 3
+    case photos = 4
+    case microphone = 5
+    case camera = 6
+    case mediaLibrary = 7
+    case homeKit = 8
+    @available(iOS 15.0, *)
+    case focus = 9
+    @available(iOS 15.4, *)
+    case localNetwork = -1073741829
+    case bluetooth = -1073741824
+    case keyboardNetwork = -1073741825
+    case location = -1073741826
+    @available(iOS 14.0, *)
+    case health = -1073741827
+    @available(iOS 15.0, *)
+    case userTracking = -1073741828
+
+    /// The macOS TCC service that holds this resource's answer, as
+    /// `tccutil` names it; nil where macOS has none for an app.
+    var tccService: String? {
+        switch self {
+        case .contacts: return "AddressBook"
+        case .calendar: return "Calendar"
+        case .reminders: return "Reminders"
+        case .photos: return "Photos"
+        case .microphone: return "Microphone"
+        case .camera: return "Camera"
+        case .mediaLibrary: return "MediaLibrary"
+        case .homeKit: return "Willow"
+        case .focus: return "FocusStatus"
+        case .bluetooth: return "BluetoothAlways"
+        case .userTracking: return "UserTracking"
+        case .localNetwork, .keyboardNetwork, .location, .health: return nil
+        }
     }
 }
 

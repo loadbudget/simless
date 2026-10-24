@@ -105,6 +105,68 @@ final class XCUITemplateTests: XCTestCase {
         XCTAssertEqual(r.code, 0, r.out)
     }
 
+    /// Each TCC service the resources name is one `tccutil` resets, and
+    /// resetAuthorizationStatus runs it under SIMLESS_PERMISSIONS=ask. The
+    /// resets go to a throwaway app registered with Launch Services for the
+    /// test, which has no rows in the TCC store, so the store stays as it was.
+    func testProtectedResourcesResetTheirTCCService() throws {
+        let source = """
+            import XCTest
+
+            final class ProbeUITests: XCTestCase {
+                static let all: [XCUIProtectedResource] = [.contacts, .calendar, .reminders, .photos, .microphone, .camera,
+                    .mediaLibrary, .homeKit, .focus, .localNetwork, .bluetooth, .keyboardNetwork, .location, .health, .userTracking]
+
+                func testPrintServices() {
+                    for r in Self.all { print("tcc \\(r.rawValue) \\(r.tccService ?? "none")") }
+                }
+
+                @MainActor
+                func testReset() {
+                    for r in Self.all { XCUIApplication().resetAuthorizationStatus(for: r) }
+                }
+            }
+            """
+        let bundle = try build(source: source)
+        let printed = try Shell.run(["xcrun", "xctest", "-XCTest", "ProbeUITests/testPrintServices", bundle])
+        XCTAssertEqual(printed.code, 0, printed.out)
+        let services = Dictionary(uniqueKeysWithValues: printed.out.split(separator: "\n").compactMap { line -> (Int, String)? in
+            let f = line.split(separator: " ")
+            guard f.count == 3, f[0] == "tcc", let raw = Int(f[1]) else { return nil }
+            return (raw, String(f[2]))
+        })
+        XCTAssertEqual(services, [1: "AddressBook", 2: "Calendar", 3: "Reminders", 4: "Photos", 5: "Microphone", 6: "Camera",
+                                  7: "MediaLibrary", 8: "Willow", 9: "FocusStatus", -1073741829: "none", -1073741824: "BluetoothAlways",
+                                  -1073741825: "none", -1073741826: "none", -1073741827: "none", -1073741828: "UserTracking"])
+
+        let id = "simless.tests.tcc-\(UUID().uuidString)"
+        // Launch Services finds no app under the temporary folder, so this one
+        // goes in the package's build folder.
+        let appDir = "\(Paths.toolRoot)/.build/simless-tests-\(UUID().uuidString)"
+        let app = "\(appDir)/TCCProbe.app"
+        try FileManager.default.createDirectory(atPath: "\(app)/Contents/MacOS", withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: appDir) }
+        try FileManager.default.copyItem(atPath: "/usr/bin/true", toPath: "\(app)/Contents/MacOS/TCCProbe")
+        let info: [String: Any] = ["CFBundleExecutable": "TCCProbe", "CFBundleIdentifier": id, "CFBundlePackageType": "APPL"]
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+            .write(to: URL(fileURLWithPath: "\(app)/Contents/Info.plist"))
+        let lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+        try Shell.check([lsregister, "-f", app])
+        defer { _ = try? Shell.run([lsregister, "-u", app]) }
+
+        for service in Set(services.values).subtracting(["none"]).sorted() {
+            let r = try Shell.run(["/usr/bin/tccutil", "reset", service, id])
+            XCTAssertEqual(r.code, 0, "\(service): \(r.out)")
+        }
+        let reset = try Shell.run(["xcrun", "xctest", "-XCTest", "ProbeUITests/testReset", bundle],
+                                  env: ["SIMLESS_PERMISSIONS": "ask", "SIMLESS_UI_SLOT": id])
+        XCTAssertEqual(reset.code, 0, reset.out)
+        // By default nothing is stored, so nothing runs: an unknown slot fails no test.
+        let none = try Shell.run(["xcrun", "xctest", "-XCTest", "ProbeUITests/testReset", bundle],
+                                 env: ["SIMLESS_PERMISSIONS": "", "SIMLESS_UI_SLOT": "simless.tests.none"])
+        XCTAssertEqual(none.code, 0, none.out)
+    }
+
     /// The bundle as UITestEngine.build makes it: the platform conditions
     /// rewritten, the same swiftc command, Swift 6.
     private func build(source: String) throws -> String {

@@ -224,7 +224,7 @@ simless version                   version, Xcode and macOS
 
 `--from <file>` (or `--from -` for stdin) takes test ids one per line, in the format the results files use, so a merge script can pass the tests a change touches. Unit and UI ids can be mixed: both kinds run, with one exit code.
 
-`simless test ui` runs the UI test targets' XCUITest code as it is: `XCUIApplication` with launch arguments and environment, queries, `waitForExistence` and `wait(for:toEqual:timeout:)`, `snapshot()`, `tap`, `typeText`, swipes, coordinates, alerts, `performAccessibilityAudit` and screenshots. It spreads the tests over several hidden hosts (`--jobs`, default up to 4), and saves a screenshot and the element tree for every failure. `--device iphone,ipad` runs every UI test on both, and `tests.uiDevices` adds a device that runs only the tests listed for it (an iPad-only class, say). See [UI tests](#ui-tests) for what it emulates and what still needs a simulator.
+`simless test ui` runs the UI test targets' XCUITest code as it is: `XCUIApplication` with launch arguments and environment, queries, `waitForExistence` and `wait(for:toEqual:timeout:)`, `snapshot()`, `resetAuthorizationStatus(for:)`, `tap`, `typeText`, swipes, coordinates, alerts, `performAccessibilityAudit` and screenshots. It spreads the tests over several hidden hosts (`--jobs`, default up to 4), and saves a screenshot and the element tree for every failure. `--device iphone,ipad` runs every UI test on both, and `tests.uiDevices` adds a device that runs only the tests listed for it (an iPad-only class, say). See [UI tests](#ui-tests) for what it emulates and what still needs a simulator.
 
 </details>
 
