@@ -735,7 +735,8 @@ enum Hit {
 
 // MARK: - Screen updates
 
-/// The render window has no scene, so nothing drives its screen updates: a
+/// With no login session the render window has no scene, so nothing drives
+/// its screen updates: a
 /// change SwiftUI makes after the first frame (a List that appears once a
 /// `.task` loads its data) stays in the view graph, and the List's collection
 /// view never gets its cells or a place in the window. Taking a snapshot after
