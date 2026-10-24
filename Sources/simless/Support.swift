@@ -347,11 +347,9 @@ struct GlobalState: Codable {
     static func slot(bundleBase: String, worktree: String, kind: String? = nil) throws -> SlotRecord {
         try withLock(lockName(forWorktree: worktree)) {
             var s = load(worktree: worktree)
-            // A stopped host's port may since have gone to another program.
-            let keep = { (r: SlotRecord) in portIsFree(r.port) || RuntimeHost.hasProcess(r) }
             let others = all().filter { $0.worktree != worktree }
             let (r, replaced) = try s.assign(bundleBase: bundleBase, worktree: worktree, kind: kind,
-                                             others: others, keep: keep) { usedPorts in
+                                             others: others, keep: keepsPort) { usedPorts in
                 try freePort(avoiding: usedPorts)
             }
             for old in replaced {
@@ -360,6 +358,25 @@ struct GlobalState: Codable {
             }
             try s.save(worktree: worktree)
             return r
+        }
+    }
+
+    /// Whether a slot keeps its port: a stopped host's port may since have
+    /// gone to another program.
+    static func keepsPort(_ r: SlotRecord) -> Bool { portIsFree(r.port) || RuntimeHost.hasProcess(r) }
+
+    /// `record` as saved, with a new port if another program took its port
+    /// while its host was stopped.
+    static func withFreePort(_ record: SlotRecord) throws -> SlotRecord {
+        try withLock(lockName(forWorktree: record.worktree)) {
+            var s = load(worktree: record.worktree)
+            guard let i = s.slots.firstIndex(where: { $0.slotID == record.slotID }) else { return record }
+            if !keepsPort(s.slots[i]) {
+                let others = all().filter { $0.worktree != record.worktree }
+                s.slots[i].port = try freePort(avoiding: Set((s.slots + others).map(\.port)))
+                try s.save(worktree: record.worktree)
+            }
+            return s.slots[i]
         }
     }
 
@@ -376,7 +393,7 @@ struct GlobalState: Codable {
         let same = { (r: SlotRecord) in r.bundleBase == bundleBase && r.kind == kind }
         if let i = slots.firstIndex(where: { same($0) && $0.worktree == worktree && $0.n == n }) {
             if !keep(slots[i]) {
-                slots[i].port = try port(Set(slots.map(\.port)))
+                slots[i].port = try port(Set((slots + others).map(\.port)))
             }
             return (slots[i], [])
         }
@@ -385,7 +402,7 @@ struct GlobalState: Codable {
         }
         let replaced = slots.filter { same($0) && $0.worktree == worktree }
         slots.removeAll { same($0) && $0.worktree == worktree }
-        var r = SlotRecord(bundleBase: bundleBase, n: n, worktree: worktree, port: try port(Set(slots.map(\.port))))
+        var r = SlotRecord(bundleBase: bundleBase, n: n, worktree: worktree, port: try port(Set((slots + others).map(\.port))))
         r.kind = kind
         slots.append(r)
         return (r, replaced)
@@ -412,26 +429,32 @@ struct GlobalState: Codable {
 /// A port on 127.0.0.1 that the OS reports free, and not in `avoiding` (the
 /// ports of stopped hosts, which listen again when they start). The OS picks it
 /// with a bind to port 0. Another program can take it before the host binds
-/// it. The host then doesn't start, and the next `GlobalState.slot` finds the
-/// port busy with no host of the slot on it, and picks again.
-func freePort(avoiding: Set<Int> = []) throws -> Int {
+/// it. The host then doesn't start, and the next command finds the port busy
+/// with no host of the slot on it, and picks again. `pick` stands in for the
+/// OS in tests.
+func freePort(avoiding: Set<Int> = [], pick: () throws -> Int = osFreePort) throws -> Int {
     for _ in 0..<20 {
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
-        guard fd >= 0 else { throw SimlessError("cannot open a socket to find a free port") }
-        defer { close(fd) }
-        var addr = sockaddr_in()
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = 0
-        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
-        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
-        let bound = withUnsafeMutablePointer(to: &addr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, len) == 0 && getsockname(fd, $0, &len) == 0 }
-        }
-        guard bound else { throw SimlessError("the OS gave no free port on 127.0.0.1") }
-        let port = Int(UInt16(bigEndian: addr.sin_port))
+        let port = try pick()
         if !avoiding.contains(port) { return port }
     }
     throw SimlessError("the OS kept giving ports that stopped simless hosts hold")
+}
+
+/// The port the OS gives a bind to 127.0.0.1:0.
+func osFreePort() throws -> Int {
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    guard fd >= 0 else { throw SimlessError("cannot open a socket to find a free port") }
+    defer { close(fd) }
+    var addr = sockaddr_in()
+    addr.sin_family = sa_family_t(AF_INET)
+    addr.sin_port = 0
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+    var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+    let bound = withUnsafeMutablePointer(to: &addr) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, len) == 0 && getsockname(fd, $0, &len) == 0 }
+    }
+    guard bound else { throw SimlessError("the OS gave no free port on 127.0.0.1") }
+    return Int(UInt16(bigEndian: addr.sin_port))
 }
 
 /// Whether nothing listens on 127.0.0.1:`port`.

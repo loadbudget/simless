@@ -119,16 +119,31 @@ final class PreviewsTests: XCTestCase {
                        "doesn't compile outside Xcode's previews: cannot find 'sample' in scope")
     }
 
-    func testPreviewsThatStillFailAfterTheLastRoundThrow() {
+    func testPreviewsThatStillFailAfterTheLastRoundKeepTheReasons() throws {
         let lines = [11, 16]
         var compiled = 0
-        XCTAssertThrowsError(try Previews.compileLeavingOut(input(), rounds: 2) { _, _ in
+        let m = try Previews.compileLeavingOut(input(), rounds: 2) { _, _ in
             defer { compiled += 1 }
             throw SimlessError("patch compile failed\nNoteRow.swift:\(lines[compiled]):5: error: no such module 'WatchKit'")
-        }) { error in
-            XCTAssertEqual("\(error)", "previews still don't compile after 2 rounds (2 left out so far); NoteRow.swift:16:5: error: no such module 'WatchKit'")
         }
         XCTAssertEqual(compiled, 2)
+        XCTAssertNil(m.dylib)
+        XCTAssertEqual(m.failure, "previews still don't compile after 2 rounds (2 left out for compile errors); NoteRow.swift:16:5: error: no such module 'WatchKit'")
+        XCTAssertEqual(m.entries.first { $0.name == "NoteRow.2" }?.skipped,
+                       "doesn't compile outside Xcode's previews: no such module 'WatchKit'")
+        XCTAssertNotNil(m.entries.first { $0.skipped == nil })
+    }
+
+    func testALastRoundThatLeavesOutEveryPreviewIsNoFailure() throws {
+        // An error outside every preview leaves out all of its file's previews.
+        let errors = ["NoteRow.swift:1:1", "NotesApp.swift:1:1"]
+        var compiled = 0
+        let m = try Previews.compileLeavingOut(input(), rounds: errors.count) { _, _ in
+            defer { compiled += 1 }
+            throw SimlessError("patch compile failed\n\(errors[compiled]): error: no such module 'WatchKit'")
+        }
+        XCTAssertNil(m.failure)
+        XCTAssertTrue(m.entries.allSatisfy { $0.skipped != nil })
     }
 
     func testOnlyGeneratesWhatsAsked() {

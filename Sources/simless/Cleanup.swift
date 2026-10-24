@@ -301,9 +301,9 @@ enum Cleanup {
             print("removed all simless hosts, slots and caches (\(Paths.cache))")
         } else {
             let ws = try Workspace.load()
-            let settings = try? ws.settings()
-            // The render slot and its test and UI-test siblings.
-            for slot in GlobalState.load(worktree: ws.root).slots where settings.map({ $0.bundleID == slot.bundleBase }) ?? false && slot.worktree == ws.root {
+            // Every slot of the worktree, an old bundle id's too: deleting the
+            // work folder below deletes their records and folders.
+            for slot in GlobalState.load(worktree: ws.root).slots {
                 removeSlot(slot)
                 try GlobalState.release(slot)
             }
