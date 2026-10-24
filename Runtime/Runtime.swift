@@ -12,6 +12,7 @@
 //   in-process (Swift Testing through its ABI entry point, XCTest through its
 //   runtime), streaming events to `simless test`. No xcodebuild launch per run.
 // - UI automation for `simless test` UI tests (UIAutomation.swift).
+// - The render server for an app without SimlessKit (RenderHost.swift).
 //
 // Protocol: newline-delimited JSON on 127.0.0.1:$SIMLESS_RUNTIME_PORT.
 
@@ -73,6 +74,8 @@ public func simlessRuntimeStart() {
             DeviceModel.watchSupported()
         }
     }
+    // A render host of an app without SimlessKit: the render server (RenderHost.swift).
+    if env["SIMLESS_RENDER_SERVER"] == "1" { SimlessHost.startIfRequested() }
     if let port = env["SIMLESS_RUNTIME_PORT"].flatMap({ UInt16($0) }) {
         // A host is a hidden background app, which macOS naps: timers slow
         // down and work drops to background priority. Tests run it at full speed.
@@ -85,7 +88,8 @@ public func simlessRuntimeStart() {
 
 private var appNapOff: NSObjectProtocol?
 
-/// `simless act` in a render host: SimlessKit hands over each `ui.*` request
+/// `simless act` in a render host: SimlessKit, or the render server in
+/// RenderHost.swift, hands over each `ui.*` request
 /// (one JSON line) with the window the fixture is in, and gets the answer,
 /// as a JSON line, on the main thread.
 @_cdecl("simless_runtime_ui")

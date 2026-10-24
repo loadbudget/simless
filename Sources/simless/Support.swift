@@ -303,6 +303,10 @@ struct SlotRecord: Codable {
     var covered: [String]?      // fixtures the newest patch renders with the edits
     var stale: [String]?        // fixtures that reach an edit the newest patch doesn't cover
     var kind: String?           // nil: the render host. "test": unit tests. "ui1"...: UI test app hosts
+    var builtWithKit: Bool?     // whether the last full build had SimlessKit; nil: a record from before it was kept
+    /// Whether the installed build serves renders with SimlessKit. A record
+    /// with no answer is from a simless that needed the kit in every app.
+    var kitInBuild: Bool { builtWithKit ?? true }
     var slotID: String { "\(bundleBase).simless\(n)\(kind.map { "-" + $0 } ?? "")" }
     var dir: String { "\(Paths.slotsDir(forWorktree: worktree))/\(slotID)" }
 }

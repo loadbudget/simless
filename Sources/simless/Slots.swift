@@ -77,6 +77,7 @@ enum Slots {
         let runtime = try RuntimeBuild.dylib(team: settings.team)
         try? fm.removeItem(atPath: "\(slot.dir)/SimlessRuntime.dylib")
         try fm.copyItem(atPath: runtime, toPath: "\(slot.dir)/SimlessRuntime.dylib")
+        try RuntimeHost.installModule(slot)
         try settings.bundleID.write(toFile: "\(slot.dir)/original-id.txt", atomically: true, encoding: .utf8)
         Log.step("slot \(slot.slotID) prepared in \(secs(t))")
     }
@@ -286,11 +287,7 @@ enum Slots {
                 // The host's stderr names a trap (`Fatal error: ...`) when macOS
                 // writes no crash report (it limits repeated ones).
                 try? FileManager.default.removeItem(atPath: "\(slot.dir)/host.log")
-                let env = RuntimeHost.baseEnvironment(slot).sorted { $0.key < $1.key }.flatMap { ["--env", "\($0.key)=\($0.value)"] }
-                _ = try? Shell.run(["/usr/bin/open", "-g", "-j", "--stderr", "\(slot.dir)/host.log"] + env + [
-                                    "\(installed)/\(wrapper)", "--args",
-                                    "--simless-port", String(slot.port),
-                                    "--simless-idle", String(idleMinutes * 60)] + extra)
+                _ = try? Shell.run(openCommand(slot, app: "\(installed)/\(wrapper)", idleMinutes: idleMinutes, extra: extra))
             }
             if let stats = slot.stats() {
                 Log.step("host \(slot.slotID) up on :\(slot.port) in \(secs(t))")
@@ -303,12 +300,25 @@ enum Slots {
         throw SimlessError("host \(slot.slotID) did not start; see \(slot.dir)/install.log")
     }
 
+    /// The arguments of a render host: its port and idle limit, then `extra`.
+    static func hostArguments(_ slot: SlotRecord, idleMinutes: Int, extra: [String]) -> [String] {
+        ["--simless-port", String(slot.port), "--simless-idle", String(idleMinutes * 60)] + extra
+    }
+
+    /// How a dfi render host is opened: hidden, its stderr in the slot's log,
+    /// with the render host's environment.
+    static func openCommand(_ slot: SlotRecord, app: String, idleMinutes: Int, extra: [String]) -> [String] {
+        let env = RuntimeHost.renderEnvironment(slot).sorted { $0.key < $1.key }.flatMap { ["--env", "\($0.key)=\($0.value)"] }
+        return ["/usr/bin/open", "-g", "-j", "--stderr", "\(slot.dir)/host.log"] + env + [app, "--args"]
+            + hostArguments(slot, idleMinutes: idleMinutes, extra: extra)
+    }
+
     /// The native host: started directly, answering within a second or two. A
     /// start that doesn't answer is retried with growing patience, like `open`.
     private static func launchNative(_ slot: SlotRecord, idleMinutes: Int, extra: [String]) throws {
         let t = now()
         if slot.stats() == nil { terminateAll(slot) }
-        let args = ["--simless-port", String(slot.port), "--simless-idle", String(idleMinutes * 60)] + extra
+        let args = hostArguments(slot, idleMinutes: idleMinutes, extra: extra)
         let deadline = now() + 60
         let patience: [Double] = [10, 20, 30]
         var restarts = 0
@@ -329,7 +339,7 @@ enum Slots {
                     restarts += 1
                 }
                 started = now()
-                pid = try Native.launch(slot, env: RuntimeHost.baseEnvironment(slot), args: args, log: "\(slot.dir)/host.log")
+                pid = try Native.launch(slot, env: RuntimeHost.renderEnvironment(slot), args: args, log: "\(slot.dir)/host.log")
             }
             if let stats = slot.stats() {
                 Log.step("host \(slot.slotID) up on :\(slot.port) in \(secs(t))")

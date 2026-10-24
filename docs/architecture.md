@@ -10,7 +10,7 @@ simless gives coding agents a fast, headless way to check SwiftUI screens and ru
               │                 │                      signed ad hoc, LSUIElement)
               │                 │  started directly (posix_spawn), home folder in the slot
               │                 ▼
-              ├──── TCP ───► render host = your app, hidden, running SimlessKit + SimlessRuntime
+              ├──── TCP ───► render host = your app, hidden, running SimlessRuntime (+ SimlessKit, if the app has it)
               │                 ▲
               └─ patch dylib ───┘ copied into the host's tmp, dlopen'd
 ```
@@ -64,7 +64,14 @@ macOS runs one instance per bundle id. Several agents need several hosts, so eac
 
 A slot is installed through a zero-test `xcodebuild test-without-building -only-testing:<UnitTests>/SimlessInstallOnly` run (xcodebuild is the only supported installer for Designed-for-iPad apps), using a copy of the build's `.xctestrun` with the host bundle id swapped. Installs are serialized machine-wide. The host is then launched **by path** (`open -g -j <slot>/.XCInstall/<App>.app --args --simless-port N`), not by bundle id.
 
-## 3. The render host (SimlessKit)
+## 3. The render host (SimlessKit or SimlessRuntime)
+
+The render server runs in one of two places. `simless up` checks for the app's `SimlessKit.swift` (`<kitDir>/SimlessKit.swift`) as the build starts, and records the answer in the render slot's record with the build. Each later launch of the render host, and each dylib compiled for it, follows the record, not the file on disk:
+
+- **Built with the kit:** the kit serves renders, as described below. simless does not set `SIMLESS_RENDER_SERVER`, and the dylibs it compiles use the kit's `SimlessRegistry` through `@testable import <App>`.
+- **Built without the kit:** simless launches the render host with `SIMLESS_RENDER_SERVER=1`. SimlessRuntime reads it in its constructor and starts the same server, with the same protocol, on `--simless-port` (`Runtime/RenderHost.swift`). It logs `simless-runtime: render server on 127.0.0.1:<port>` to the host's log. The runtime build also writes `SimlessRuntime.swiftmodule`. Each slot gets a copy of it with each copy of the runtime it injects, and the fixtures, previews and patch dylibs `import SimlessRuntime` from that copy for its `SimlessRegistry`. They compile for iOS 17.0 or later, the runtime's own target. The fixtures reach the host only in the previews dylib, so `simless up` builds that dylib even when the app has no preview or sets `"previews": false`. `SimlessFixtures.swift` is still required: every one of those dylibs compiles it and calls `simlessFixtures`. The runtime hides the render host only. The kit also hides the install and unit-test runs that carry `SIMLESS_HEADLESS=1`, and the runtime does not.
+
+The variable is set only for a build without the kit, so one server listens on the port. When the kit is added or deleted after a build, `simless reload` builds the app again instead of patching it.
 
 `SimlessKit.swift` is a single `#if SIMLESS` file that `simless init` adds to the app. It does nothing unless the app is launched with `--simless-port`. When it is, it:
 
@@ -89,7 +96,7 @@ SimlessRuntime, which every host loads before the app's own code, also takes the
 - `displayScale` is pinned to 2, because the hidden window lands on an arbitrary display.
 - it returns the accessibility elements (role, label, value, identifier, frame), plus a PNG if requested.
 
-`simless act` mounts a fixture the same way, then sends the kit `ui.*` requests (snapshot, tap, type, swipe, idle). The kit hands each to SimlessRuntime (`simless_runtime_ui`), whose UI test automation then works on the render window only, plus menus and alerts above it. The render window is in the app's scene, or has none on a Mac with no login session, and in both a text field in it still becomes first responder and takes typed text. A final `tree` request reads the canvas as it is, without mounting it again.
+`simless act` mounts a fixture the same way, then sends the render server `ui.*` requests (snapshot, tap, type, swipe, idle). The server hands each to SimlessRuntime (`simless_runtime_ui`), whose UI test automation then works on the render window only, plus menus and alerts above it. The render window is in the app's scene, or has none on a Mac with no login session, and in both a text field in it still becomes first responder and takes typed text. A final `tree` request reads the canvas as it is, without mounting it again.
 
 Renders take ~20–60 ms. The CLI turns the tree into compact text and runs deterministic checks:
 - controls without labels,
@@ -181,7 +188,7 @@ Tests are spread over several hosts (`--jobs`) by their last durations. Each hos
 
 ## Calibration
 
-`simless calibrate` builds the app for the iOS Simulator, boots one dedicated simulator and launches the app there with the same `--simless-port` argument. The same SimlessKit then serves renders from real iOS, with the device's own safe areas and traits. For every fixture it renders on both, aligns the two accessibility trees by role, label and identifier (longest common subsequence), and reports elements present on only one side, and frames that differ by more than 2 pt. It's the only command that boots a simulator, and it deletes the device afterwards.
+`simless calibrate` builds the app for the iOS Simulator, boots one dedicated simulator and launches the app there with the same `--simless-port` argument. The same SimlessKit then serves renders from real iOS, with the device's own safe areas and traits. SimlessRuntime is not loaded in the simulator, so calibration needs the kit in the app, and without it `simless calibrate` stops with an error before it builds. For every fixture it renders on both, aligns the two accessibility trees by role, label and identifier (longest common subsequence), and reports elements present on only one side, and frames that differ by more than 2 pt. It's the only command that boots a simulator, and it deletes the device afterwards.
 
 ## 5. SimlessAgent and its security model (dfi mode)
 

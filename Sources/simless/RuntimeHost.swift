@@ -39,6 +39,29 @@ enum RuntimeHost {
         if mtime(copy) < mtime(runtime) || (try? FileManager.default.attributesOfItem(atPath: copy)[.size] as? Int) != (try? FileManager.default.attributesOfItem(atPath: runtime)[.size] as? Int) {
             try? FileManager.default.removeItem(atPath: copy)
             try FileManager.default.copyItem(atPath: runtime, toPath: copy)
+            try installModule(slot)
+        } else if !exists(module(slot)) {
+            try installModule(slot)
+        }
+    }
+
+    /// The folder of the slot's copy of SimlessRuntime.swiftmodule, for `-I`.
+    /// It is copied with each copy of the runtime the slot injects, so a dylib
+    /// compiled against it binds to that runtime.
+    static func moduleDir(_ slot: SlotRecord) -> String { "\(slot.dir)/runtime-module" }
+    static func module(_ slot: SlotRecord) -> String { "\(moduleDir(slot))/SimlessRuntime.swiftmodule" }
+
+    /// Copies the module of the current runtime build into the slot. The
+    /// rename replaces it in one step, so a compile that reads it meanwhile
+    /// reads the old file or the new one.
+    static func installModule(_ slot: SlotRecord) throws {
+        let source = "\(try RuntimeBuild.moduleDir())/SimlessRuntime.swiftmodule"
+        try mkdirp(moduleDir(slot))
+        let tmp = "\(moduleDir(slot))/.\(UUID().uuidString).swiftmodule"
+        try FileManager.default.copyItem(atPath: source, toPath: tmp)
+        guard rename(tmp, module(slot)) == 0 else {
+            try? FileManager.default.removeItem(atPath: tmp)
+            throw SimlessError("could not place SimlessRuntime.swiftmodule in \(slot.slotID): \(String(cString: strerror(errno)))")
         }
     }
 
@@ -75,6 +98,20 @@ enum RuntimeHost {
             env["SIMLESS_NETWORK"] = network
         }
         return env
+    }
+
+    /// Set to "1" on a render host whose app has no SimlessKit: SimlessRuntime
+    /// then serves renders on `--simless-port`. Never set when the app has the
+    /// kit, so one server listens on the port.
+    static let renderServerKey = "SIMLESS_RENDER_SERVER"
+
+    static func renderServer(kitInApp: Bool) -> [String: String] { kitInApp ? [:] : [renderServerKey: "1"] }
+
+    /// Environment of a render host: the base, and the render server when the
+    /// installed build has no kit to serve renders. From the slot's record of
+    /// that build, not from the sources, which can have changed since.
+    static func renderEnvironment(_ slot: SlotRecord) -> [String: String] {
+        baseEnvironment(slot).merging(renderServer(kitInApp: slot.kitInBuild)) { $1 }
     }
 
     /// What a host may reach, as SimlessRuntime reads it (Runtime/Network.swift),
