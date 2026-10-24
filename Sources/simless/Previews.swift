@@ -30,6 +30,8 @@ enum Previews {
     struct Manifest: Codable {
         var dylib: String?
         var entries: [Entry]
+        /// Why the previews have no library although some weren't left out.
+        var failure: String?
     }
 
     static func dir(_ ws: Workspace) -> String { "\(ws.work)/previews" }
@@ -327,7 +329,9 @@ enum Previews {
     // MARK: - Building and loading
 
     /// Compiles the previews and root for the current build. Previews that
-    /// don't compile are left out with the reason, a few rounds at most.
+    /// don't compile are left out with the reason, a few rounds at most. If
+    /// the last round still fails, the manifest is saved with the reasons
+    /// and the build throws.
     @discardableResult
     static func build(ws: Workspace, slot: SlotRecord, settings: Workspace.Settings) throws -> Manifest {
         let t = now()
@@ -341,6 +345,7 @@ enum Previews {
                               name: "SimlessPreviews", dir: d, prelude: prelude, entry: "        simlessRegisterPreviews(r)")
         }
         try save(ws, m)
+        if let failure = m.failure { throw SimlessError(failure) }
         if m.dylib != nil {
             let made = m.entries.filter { $0.skipped == nil }.count
             Log.step("previews: \(made) fixture(s) from #Preview\(m.entries.contains { $0.name == "root" } ? " and the App" : "") in \(secs(t))")
@@ -350,8 +355,8 @@ enum Previews {
 
     /// Compiles the generated previews with `compile`, which gets them and the
     /// prelude and returns the library. Each failed round leaves out the
-    /// previews its errors are in; a round that still fails after `rounds`
-    /// throws rather than return a manifest without a library.
+    /// previews its errors are in. If a round still fails after `rounds`, the
+    /// manifest has no library and says why in `failure`.
     static func compileLeavingOut(_ input: PatchScope.Input, rounds: Int = 5,
                                   compile: (Generated, String) throws -> String) throws -> Manifest {
         var skip: [String: String] = [:]
@@ -383,10 +388,12 @@ enum Previews {
                 lastError = error
             }
         }
-        // A manifest without a library would load nothing, silently, while the
-        // summary still counted every preview not left out.
+        // The last round can leave out every preview that remained.
+        let gen = generate(input, skip: skip)
+        guard !gen.calls.isEmpty else { return Manifest(dylib: nil, entries: gen.entries) }
         let firstError = lastError?.description.split(separator: "\n").first { $0.contains("error:") } ?? ""
-        throw SimlessError("previews still don't compile after \(rounds) rounds (\(skip.count) left out so far); \(firstError.trimmingCharacters(in: .whitespaces))")
+        return Manifest(dylib: nil, entries: gen.entries,
+                        failure: "previews still don't compile after \(rounds) rounds (\(skip.count) left out for compile errors); \(firstError.trimmingCharacters(in: .whitespaces))")
     }
 
     /// For a hot reload that renders previews: their files as the patch
@@ -430,7 +437,8 @@ enum Previews {
     static func summary(_ ws: Workspace) -> String? {
         guard let m = manifest(ws), !m.entries.isEmpty else { return nil }
         let skipped = m.entries.filter { $0.skipped != nil }
-        var s = "previews: \(m.entries.count - skipped.count) of \(m.entries.count) generated"
+        let made = m.dylib == nil ? 0 : m.entries.count - skipped.count
+        var s = "previews: \(made) of \(m.entries.count) generated"
         if !skipped.isEmpty {
             s += "; left out: " + skipped.prefix(5).map { "\($0.name) (\($0.skipped!))" }.joined(separator: "; ")
             if skipped.count > 5 { s += "; +\(skipped.count - 5) more in \(manifestPath(ws))" }
