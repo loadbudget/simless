@@ -70,8 +70,8 @@ enum Slots {
         }
         let xctestrun = "\(slot.dir)/slot.xctestrun"
         try? fm.removeItem(atPath: xctestrun)
-        try retargetXCTestRun(from: src, to: xctestrun,
-                              hostBundleID: settings.bundleID, slotID: slot.slotID)
+        try retargetXCTestRun(from: src, to: xctestrun, hostBundleID: settings.bundleID, slotID: slot.slotID,
+                              runtime: "\(slot.dir)/SimlessRuntime.dylib")
         // The runtime every launch of this slot injects (Dynamic Type, original
         // bundle ids, the test runner), outside the app so it never needs re-signing.
         let runtime = try RuntimeBuild.dylib(team: settings.team)
@@ -104,10 +104,12 @@ enum Slots {
     }
 
     /// Copies the build's .xctestrun with the test host's bundle id swapped for
-    /// the slot's, and SIMLESS_HEADLESS set so install and test runs never show a
-    /// window. Handles both formats: v2 (`TestConfigurations[].TestTargets[]`,
-    /// schemes with a test plan) and v1 (test targets as top-level keys).
-    private static func retargetXCTestRun(from src: String, to dst: String, hostBundleID: String, slotID: String) throws {
+    /// the slot's, SIMLESS_HEADLESS set, and the slot's SimlessRuntime (`runtime`)
+    /// inserted into the app it hosts, so the install run never shows a window,
+    /// with or without SimlessKit. Handles both formats: v2
+    /// (`TestConfigurations[].TestTargets[]`, schemes with a test plan) and v1
+    /// (test targets as top-level keys).
+    static func retargetXCTestRun(from src: String, to dst: String, hostBundleID: String, slotID: String, runtime: String) throws {
         guard let data = FileManager.default.contents(atPath: src),
               var plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
             throw SimlessError("could not read \(src)")
@@ -117,7 +119,15 @@ enum Slots {
             var env = t["EnvironmentVariables"] as? [String: Any] ?? [:]
             env["SIMLESS_HEADLESS"] = "1"
             t["EnvironmentVariables"] = env
-            if t["TestHostBundleIdentifier"] as? String == hostBundleID { t["TestHostBundleIdentifier"] = slotID }
+            if t["TestHostBundleIdentifier"] as? String == hostBundleID {
+                t["TestHostBundleIdentifier"] = slotID
+                // xcodebuild starts the test host with these, its own inserted
+                // libraries (libXCTestBundleInject) first; the runtime goes after them.
+                var testing = t["TestingEnvironmentVariables"] as? [String: Any] ?? [:]
+                let inserted = (testing["DYLD_INSERT_LIBRARIES"] as? String).map { $0.split(separator: ":").map(String.init) } ?? []
+                testing["DYLD_INSERT_LIBRARIES"] = (inserted.filter { $0 != runtime } + [runtime]).joined(separator: ":")
+                t["TestingEnvironmentVariables"] = testing
+            }
             return t
         }
         if let configs = plist["TestConfigurations"] as? [[String: Any]] {

@@ -5,14 +5,18 @@ import Foundation
 import ObjectiveC
 import MachO
 
-/// Keeps a UI test host invisible without SIMLESS_HEADLESS: that variable tells
-/// the app it's a render host (apps skip analytics and sync on it), while a UI
-/// test needs the app's real launch, as XCUITest gives it. Window ordering is
-/// made a no-op as soon as AppKit loads, before the first window exists.
+/// Keeps a host simless launched invisible, with or without SimlessKit: render,
+/// unit test and install runs (SIMLESS_HEADLESS) and UI test hosts (SIMLESS_UI,
+/// which leave SIMLESS_HEADLESS out for the app's real launch). Window ordering
+/// is made a no-op as soon as AppKit loads, before the first window exists.
 enum Headless {
     private static var done = false
+    private static var installed = false
 
     static func install() {
+        guard !installed else { return }
+        installed = true
+        runtimeLog("headless")
         _dyld_register_func_for_add_image { _, _ in Headless.tryInstall() }
         DispatchQueue.main.async { tryInstall(); hide() }
         NotificationCenter.default.addObserver(forName: NSNotification.Name("UIWindowDidBecomeVisibleNotification"), object: nil, queue: .main) { _ in hide() }
