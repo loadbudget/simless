@@ -5,9 +5,9 @@ import XCTest
 @testable import simless
 
 /// SimlessRuntime makes `UIDevice.current.userInterfaceIdiom` report phone
-/// while a window's root view controller overrides the idiom to phone, as a
-/// render under `--idiom phone` does. Slow: it builds the runtime and a Mac
-/// Catalyst app, so it runs only with SIMLESS_SLOW_TESTS=1.
+/// while a window has a root that overrode the idiom to phone when it was
+/// set, as a render under `--idiom phone` does. Slow: it builds the runtime
+/// and a Mac Catalyst app, so it runs only with SIMLESS_SLOW_TESTS=1.
 final class RuntimeIdiomTests: XCTestCase {
     var dir: String!
 
@@ -22,37 +22,80 @@ final class RuntimeIdiomTests: XCTestCase {
         if let dir { try? FileManager.default.removeItem(atPath: dir) }
     }
 
-    /// The device's idiom (raw values) before any root, with a phone root, after
-    /// another window takes a root, and after the phone root's window takes another.
+    /// The device's idiom after each step, by name: "phone", or "mac" for the
+    /// Mac's own. A step that throws (UIKit's "Cannot override interface idiom")
+    /// ends the probe without its line.
     func testTheDeviceIdiomFollowsAPhoneRoot() throws {
-        let seen = try runProbe(), phone = 0  // UIUserInterfaceIdiom.phone
-        XCTAssertEqual(seen.count, 4, "\(seen)")
-        XCTAssertNotEqual(seen.first, phone)
-        XCTAssertEqual(Array(seen.dropFirst().prefix(2)), [phone, phone])
-        XCTAssertEqual(seen.last, seen.first)
+        let seen = try runProbe()
+        XCTAssertEqual(seen, [
+            "start=mac",
+            "phoneRoot=phone",
+            "otherWindowRoot=phone",
+            "otherWindowVisible=phone",
+            "alert=phone",
+            "nilRoot=mac",
+            "releasedWindow=mac",
+            "twoPhoneWindows=phone",
+            "oneLeft=phone",
+            "noneLeft=mac",
+        ])
     }
 
-    func runProbe() throws -> [Int] {
+    func runProbe() throws -> [String] {
         let runtime = try RuntimeBuild.nativeDylib()
         try """
             import UIKit
 
             final class Probe: NSObject, UIApplicationDelegate {
+                var steps: [String] = []
+
+                func step(_ name: String) {
+                    steps.append(name + "=" + (UIDevice.current.userInterfaceIdiom == .phone ? "phone" : "mac"))
+                }
+
+                func phoneRoot() -> UIViewController {
+                    let vc = UIViewController()
+                    vc.traitOverrides.userInterfaceIdiom = .phone
+                    return vc
+                }
+
                 func application(_ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-                    let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
-                    let other = UIWindow(frame: window.frame)
-                    let phone = UIViewController()
-                    phone.traitOverrides.userInterfaceIdiom = .phone
-                    var seen = [UIDevice.current.userInterfaceIdiom.rawValue]
-                    window.rootViewController = phone
-                    seen.append(UIDevice.current.userInterfaceIdiom.rawValue)
+                    let frame = CGRect(x: 0, y: 0, width: 100, height: 100)
+                    let window = UIWindow(frame: frame), other = UIWindow(frame: frame)
+                    step("start")
+                    let root = phoneRoot()
+                    window.rootViewController = root
+                    window.isHidden = false
+                    step("phoneRoot")
                     other.rootViewController = UIViewController()
-                    seen.append(UIDevice.current.userInterfaceIdiom.rawValue)
-                    window.rootViewController = UIViewController()
-                    seen.append(UIDevice.current.userInterfaceIdiom.rawValue)
-                    print("idioms " + seen.map(String.init).joined(separator: " "))
-                    fflush(stdout)
-                    exit(0)
+                    step("otherWindowRoot")
+                    other.isHidden = false
+                    step("otherWindowVisible")
+                    let alert = UIAlertController(title: "Probe", message: nil, preferredStyle: .alert)
+                    alert.addAction(UIAlertAction(title: "OK", style: .default))
+                    root.present(alert, animated: false)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [self] in
+                        step("alert")
+                        root.dismiss(animated: false)
+                        window.rootViewController = nil
+                        step("nilRoot")
+                        autoreleasepool {
+                            let released = UIWindow(frame: frame)
+                            released.rootViewController = phoneRoot()
+                        }
+                        step("releasedWindow")
+                        window.rootViewController = phoneRoot()
+                        other.rootViewController = phoneRoot()
+                        step("twoPhoneWindows")
+                        other.rootViewController = UIViewController()
+                        step("oneLeft")
+                        window.rootViewController = UIViewController()
+                        step("noneLeft")
+                        print("idioms " + steps.joined(separator: " "))
+                        fflush(stdout)
+                        exit(0)
+                    }
+                    return true
                 }
             }
 
@@ -77,10 +120,15 @@ final class RuntimeIdiomTests: XCTestCase {
         try Native.signAdHoc(["\(dir!)/Probe.app"])
         // A native host, which reports itself as an iOS app on the Mac, with its home here.
         let home = "\(dir!)/home"
-        let r = try Shell.run([probe], env: ["DYLD_INSERT_LIBRARIES": runtime, "SIMLESS_HEADLESS": "1", "SIMLESS_NATIVE": "1",
-                                             "SIMLESS_UI": "", "SIMLESS_INSTALL_REPORT": "", "CFFIXED_USER_HOME": home, "HOME": home])
+        let env = ProcessInfo.processInfo.environment.merging([
+            "DYLD_INSERT_LIBRARIES": runtime, "SIMLESS_HEADLESS": "1", "SIMLESS_NATIVE": "1",
+            "SIMLESS_UI": "", "SIMLESS_INSTALL_REPORT": "", "CFFIXED_USER_HOME": home, "HOME": home,
+        ]) { $1 }
+        // A probe that never finishes launching is stopped after 60 s (exit code 15).
+        let deadline = Date().addingTimeInterval(60)
+        let r = try Shell.stream([probe], logPath: "\(dir!)/probe.log", env: env, onLine: { _ in }, tick: { Date() < deadline })
         XCTAssertEqual(r.code, 0, r.out)
         let line = r.out.split(separator: "\n").first { $0.hasPrefix("idioms ") } ?? ""
-        return line.split(separator: " ").dropFirst().compactMap { Int($0) }
+        return line.split(separator: " ").dropFirst().map(String.init)
     }
 }

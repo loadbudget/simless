@@ -161,8 +161,10 @@ struct Shell {
     static func stream(_ args: [String], cwd: String? = nil, logPath: String, env: [String: String]? = nil,
                        onLine: (String) -> Void, tick: () -> Bool) throws -> Result {
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        p.arguments = args
+        // A path runs directly, as in `run`: /usr/bin/env is protected, so
+        // macOS drops DYLD_* variables when it starts.
+        p.executableURL = URL(fileURLWithPath: args[0].hasPrefix("/") ? args[0] : "/usr/bin/env")
+        p.arguments = args[0].hasPrefix("/") ? Array(args.dropFirst()) : args
         if let cwd { p.currentDirectoryURL = URL(fileURLWithPath: cwd) }
         var environment = env ?? ProcessInfo.processInfo.environment
         if let dev = developerDir { environment["DEVELOPER_DIR"] = dev }

@@ -3,6 +3,7 @@
 
 import Foundation
 import ObjectiveC
+import os
 import UIKit
 
 /// The idiom on the Mac. An iOS app there takes it from the screen, and simless
@@ -19,17 +20,16 @@ import UIKit
 ///   original interface idiom is UIUserInterfaceIdiomPhone"). A child keeps its
 ///   parent's idiom instead.
 ///
-/// `UIDevice.current.userInterfaceIdiom` follows the render: while a window's
-/// root view controller overrides the idiom to phone (SimlessKit and the
-/// render server do for `--idiom phone`), it reports phone, so code that
-/// branches on the device takes the iPhone branch too. Another root in that
-/// window (the next render) puts the Mac's idiom back; roots of other windows
-/// (UIKit's own, for the keyboard or an alert) leave it.
+/// `UIDevice.current.userInterfaceIdiom` follows the render: it reports phone
+/// while some window's root overrode the idiom to phone when it was set
+/// (SimlessKit and the render server set it first for `--idiom phone`), so
+/// code that branches on the device takes the iPhone branch too. Another root
+/// in that window (the next render), or the window's release, takes it out;
+/// with no such window left, the Mac's idiom is back. Overrides changed after
+/// the root is set aren't followed.
 enum Idiom {
-    /// What `UIDevice.current.userInterfaceIdiom` reports; nil: the Mac's own.
-    private(set) static var device: UIUserInterfaceIdiom?
-    /// The window whose root asked for the phone idiom.
-    private static weak var phoneWindow: UIWindow?
+    /// Windows whose root asked for the phone idiom, held weakly; read from any thread.
+    private static let phoneWindows = OSAllocatedUnfairLock(uncheckedState: NSHashTable<UIWindow>.weakObjects())
 
     static func install(windows: Bool) {
         guard ProcessInfo.processInfo.isiOSAppOnMac else { return }
@@ -52,7 +52,9 @@ enum Idiom {
         guard let m = class_getInstanceMethod(UIDevice.self, sel) else { return }
         typealias Fn = @convention(c) (AnyObject, Selector) -> Int
         let original = unsafeBitCast(method_getImplementation(m), to: Fn.self)
-        let block: @convention(block) (AnyObject) -> Int = { d in device?.rawValue ?? original(d, sel) }
+        let block: @convention(block) (AnyObject) -> Int = { d in
+            phoneWindows.withLockUnchecked { $0.anyObject != nil } ? UIUserInterfaceIdiom.phone.rawValue : original(d, sel)
+        }
         method_setImplementation(m, imp_implementationWithBlock(block))
     }
 
@@ -63,11 +65,10 @@ enum Idiom {
         typealias Fn = @convention(c) (UIWindow, Selector, UIViewController?) -> Void
         let original = unsafeBitCast(method_getImplementation(m), to: Fn.self)
         let block: @convention(block) (UIWindow, UIViewController?) -> Void = { window, root in
-            if MainActor.assumeIsolated({ phone(root) }) {
-                (device, phoneWindow) = (.phone, window)
-            } else if window === phoneWindow {
-                (device, phoneWindow) = (nil, nil)
-            }
+            // Off the main thread UIKit itself complains; the idiom isn't followed there.
+            guard Thread.isMainThread else { return original(window, sel, root) }
+            let phone = MainActor.assumeIsolated { phone(root) }
+            phoneWindows.withLockUnchecked { phone ? $0.add(window) : $0.remove(window) }
             original(window, sel, root)
         }
         method_setImplementation(m, imp_implementationWithBlock(block))
