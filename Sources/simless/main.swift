@@ -283,6 +283,7 @@ func cmdUp(_ args: Args) throws {
     // Before anything is written: a refused `up` keeps the snapshot of the
     // build the host runs, so the next `reload` still sees every edit.
     try ws.checkFixtureSources()
+    try Previews.checkNames(ws)
     Cleanup.capCompileCache()
     let t = now()
     let buildStart = Date().timeIntervalSinceReferenceDate
@@ -378,7 +379,6 @@ func cmdUp(_ args: Args) throws {
     }
     try Slots.launch(slot, idleMinutes: ws.idleMinutes)
     previewsBuilt.wait()
-    if let clash = previewsError as? Previews.NameClash { throw SimlessError("the fixtures weren't built: \(clash)") }
     var notLoaded: String?
     if let previewsError { Log.info("note: fixtures from #Preview blocks weren't built: \(previewsError)") }
     else { notLoaded = Previews.load(slot) }

@@ -25,7 +25,7 @@ If it isn't set up, do it yourself:
 
 ## 2. Fixtures: the screens simless can render
 
-Some exist without any code: `root` (the app's first window, as the `@main` App builds it) and one per `#Preview` block, named `<File>.<preview name or number>`. When two share a name (two `@main` Apps), each takes its file's name: `DemoApp.root`, `DemoWatchApp.root`. `simless up` lists them. Render those first. Add fixtures for states the previews don't show.
+Some exist without any code: `root` (the app's first window, as the `@main` App builds it) and one per `#Preview` block, named `<File>.<preview name or number>`. When names are shared, two `@main` Apps are `<file name>.root` (`DemoApp.root`), previews in two files are `<folder>.<name>` (`LoadbudgetWatch.ContentView.1`), and previews in one file are `<name>`, `<name>.2`. `simless up` lists them. Render those first. Add fixtures for states the previews don't show.
 
 Put them in `<App>/Simless/SimlessFixtures.swift` (or the folder `kitDir` in `.simless.json` names). simless compiles that file into the code it loads into the host. When the app has no kit, the builds that simless runs leave it out of the app. Other builds compile it when it sits in a folder of the app target, so keep the `#if SIMLESS` guard:
 
