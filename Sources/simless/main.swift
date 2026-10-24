@@ -416,6 +416,9 @@ func runningSlot(_ ws: Workspace) throws -> SlotRecord {
 
 func cmdUp(_ args: Args) throws {
     let ws = try Workspace.load()
+    // Before anything is written: a refused `up` keeps the snapshot of the
+    // build the host runs, so the next `reload` still sees every edit.
+    try ws.checkFixtureSources()
     Cleanup.capCompileCache()
     let t = now()
     let buildStart = Date().timeIntervalSinceReferenceDate
@@ -427,7 +430,6 @@ func cmdUp(_ args: Args) throws {
     let sourcesID = try ws.snapshotSources()
     // Who serves renders in this build, as of its start (recorded once it succeeds).
     let kitInApp = ws.kitInApp
-    try ws.checkFixtureSources()
     // What this build is built from, as of its start (recorded once it succeeds).
     let inputs = BuildState.current(ws, previous: BuildState.load(ws) ?? [:])
     try? FileManager.default.removeItem(atPath: BuildState.path(ws))
@@ -512,11 +514,12 @@ func cmdUp(_ args: Args) throws {
     }
     try Slots.launch(slot, idleMinutes: ws.idleMinutes)
     previewsBuilt.wait()
+    var notLoaded: String?
     if let previewsError { Log.info("note: fixtures from #Preview blocks weren't built: \(previewsError)") }
-    else { Previews.load(slot) }
+    else { notLoaded = Previews.load(slot) }
     let stats = slot.stats() ?? [:]
     if !slot.kitInBuild, stats["patch"] as? Int ?? 0 == 0 {
-        throw SimlessError("the host started, but its fixtures weren't loaded into it (see the note above); log: \(slot.dir)/host.log")
+        throw SimlessError("the host started, but its fixtures weren't loaded into it: \(notLoaded ?? "the host answered no load"); log: \(slot.dir)/host.log")
     }
     let fixtures = stats["fixtures"] as? [String] ?? []
     if let kit = stats["kit"] as? Int ?? (stats.isEmpty ? nil : 1), kit < requiredKit {
@@ -662,6 +665,7 @@ func fullBuildReason(ws: Workspace, slot: SlotRecord, files: [String],
                      currentRuntime: () -> String = RuntimeBuild.currentDir) -> String? {
     if ws.kitInApp != slot.kitInBuild { return ws.kitInApp ? "SimlessKit added" : "SimlessKit deleted" }
     if files.contains("\(ws.root)/\(ws.config.kitFile)") { return "SimlessKit changed" }
+    if !slot.kitInBuild, !(Previews.manifest(ws)?.dylib.map(exists) ?? false) { return "the fixtures weren't built" }
     if !slot.kitInBuild, RuntimeHost.injectedBuild(slot) != currentRuntime() { return "SimlessRuntime changed" }
     return nil
 }

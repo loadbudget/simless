@@ -344,7 +344,7 @@ enum Patch {
     /// Returns nil on success, or why live reload isn't available.
     static func live(dylib: String, slot: SlotRecord) throws -> String? {
         if Native.isNative(slot) { return try liveNative(dylib: dylib, slot: slot) }
-        guard let agent = try? Agent.client() else { return "agent not running" }
+        guard let agent = try? Agent.client() else { return "SimlessAgent is not running, and the dfi mode loads dylibs into a host only through it; start it with `simless agent install`" }
         guard let tmp = slot.stats()?["tmp"] as? String else { return "host not running" }
         let name = (dylib as NSString).lastPathComponent
         let placed = try agent.call(["cmd": "place", "src": dylib, "dst": "\(tmp)/\(name)"])
