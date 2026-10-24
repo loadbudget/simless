@@ -12,8 +12,12 @@ final class PortTests: XCTestCase {
     }
 
     func testAPortAStoppedHostHoldsIsNotGiven() throws {
-        let first = try freePort()
-        XCTAssertNotEqual(try freePort(avoiding: [first]), first)
+        var given = [47800, 47800, 51234].makeIterator()
+        XCTAssertEqual(try freePort(avoiding: [47800]) { given.next()! }, 51234)
+    }
+
+    func testAnOSThatGivesOnlyHeldPortsIsRefused() {
+        XCTAssertThrowsError(try freePort(avoiding: [47800]) { 47800 })
     }
 
     /// A stopped host's port that another program took since.

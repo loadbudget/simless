@@ -405,8 +405,11 @@ func currentSlot(_ ws: Workspace) throws -> SlotRecord {
 
 /// The slot with a running host, launching it if it is installed but stopped.
 func runningSlot(_ ws: Workspace) throws -> SlotRecord {
-    let slot = try currentSlot(ws)
-    if slot.stats() == nil { try Slots.launch(slot, idleMinutes: ws.idleMinutes) }
+    var slot = try currentSlot(ws)
+    if slot.stats() == nil {
+        slot = try GlobalState.withFreePort(slot)
+        try Slots.launch(slot, idleMinutes: ws.idleMinutes)
+    }
     return slot
 }
 
