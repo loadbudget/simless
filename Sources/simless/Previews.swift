@@ -361,18 +361,24 @@ enum Previews {
     /// prelude and returns the library. Each failed round leaves out the
     /// previews its errors are in. If a round still fails after `rounds`, the
     /// manifest has no library and says why in `failure`. With no preview
-    /// left, there is no library unless `alwaysBuild` (the fixtures alone).
+    /// left, there is no library unless `alwaysBuild` (the fixtures alone,
+    /// also when the last round left out the last preview).
     static func compileLeavingOut(_ input: PatchScope.Input, rounds: Int = 5, alwaysBuild: Bool = false,
                                   compile: (Generated, String) throws -> String) throws -> Manifest {
         var skip: [String: String] = [:]
         var lastError: SimlessError?
+        func prelude(_ gen: Generated) -> String {
+            let calls = gen.calls.map { "    \($0)(r)" }.joined(separator: "\n")
+            return helpers + "\n" + registrations + "\n\n@MainActor func simlessRegisterPreviews(_ r: SimlessRegistry) {\n\(calls)\n}\n"
+        }
+        func firstError(_ error: SimlessError?) -> String {
+            (error?.description.split(separator: "\n").first { $0.contains("error:") } ?? "").trimmingCharacters(in: .whitespaces)
+        }
         for _ in 0..<rounds {
             let gen = generate(input, skip: skip)
             guard !gen.calls.isEmpty || alwaysBuild else { return Manifest(dylib: nil, entries: gen.entries) }
-            let calls = gen.calls.map { "    \($0)(r)" }.joined(separator: "\n")
-            let prelude = helpers + "\n" + registrations + "\n\n@MainActor func simlessRegisterPreviews(_ r: SimlessRegistry) {\n\(calls)\n}\n"
             do {
-                return Manifest(dylib: try compile(gen, prelude), entries: gen.entries)
+                return Manifest(dylib: try compile(gen, prelude(gen)), entries: gen.entries)
             } catch let error as SimlessError where error.description.hasPrefix("patch compile failed") {
                 // Leave out the previews the errors are in; an error elsewhere in
                 // a file (a helper it keeps) leaves out the file's previews.
@@ -395,10 +401,19 @@ enum Previews {
         }
         // The last round can leave out every preview that remained.
         let gen = generate(input, skip: skip)
-        guard !gen.calls.isEmpty else { return Manifest(dylib: nil, entries: gen.entries) }
-        let firstError = lastError?.description.split(separator: "\n").first { $0.contains("error:") } ?? ""
+        guard !gen.calls.isEmpty else {
+            guard alwaysBuild else { return Manifest(dylib: nil, entries: gen.entries) }
+            // A build without the kit has its fixtures only in this library:
+            // build it with the fixtures alone.
+            do {
+                return Manifest(dylib: try compile(gen, prelude(gen)), entries: gen.entries)
+            } catch let error as SimlessError where error.description.hasPrefix("patch compile failed") {
+                return Manifest(dylib: nil, entries: gen.entries,
+                                failure: "every preview was left out for compile errors (\(skip.count)), and the fixtures alone don't compile either; \(firstError(error))")
+            }
+        }
         return Manifest(dylib: nil, entries: gen.entries,
-                        failure: "previews still don't compile after \(rounds) rounds (\(skip.count) left out for compile errors); \(firstError.trimmingCharacters(in: .whitespaces))")
+                        failure: "previews still don't compile after \(rounds) rounds (\(skip.count) left out for compile errors); \(firstError(lastError))")
     }
 
     /// For a hot reload that renders previews: their files as the patch
@@ -420,21 +435,29 @@ enum Previews {
     }
 
     /// Loads the previews into a host that just started (before the newest
-    /// hot-reload patch, whose entry registers them again).
-    static func load(_ slot: SlotRecord) {
-        guard let ws = try? Workspace.load(at: slot.worktree), let m = manifest(ws), let dylib = m.dylib, exists(dylib) else { return }
+    /// hot-reload patch, whose entry registers them again). Returns why the
+    /// host has no previews dylib, if it has none.
+    @discardableResult
+    static func load(_ slot: SlotRecord) -> String? {
+        guard let ws = try? Workspace.load(at: slot.worktree), let m = manifest(ws) else { return "no previews were built" }
+        guard let dylib = m.dylib, exists(dylib) else { return m.failure ?? "the previews build made no library" }
         // Once per host process: `up` and the launch it does may both get here.
         let marker = "\(slot.dir)/previews-loaded", mine = "\(slot.stats()?["pid"] ?? 0) \(dylib)"
-        if (try? String(contentsOfFile: marker, encoding: .utf8)) == mine { return }
+        if (try? String(contentsOfFile: marker, encoding: .utf8)) == mine { return nil }
         // The host deletes what it loads: hand it a copy.
         let copy = "\(dir(ws))/load-\(UUID().uuidString.prefix(8)).dylib"
-        guard (try? FileManager.default.copyItem(atPath: dylib, toPath: copy)) != nil else { return }
+        guard (try? FileManager.default.copyItem(atPath: dylib, toPath: copy)) != nil else { return "could not copy \(dylib)" }
         defer { try? FileManager.default.removeItem(atPath: copy) }
         do {
-            if let why = try Patch.live(dylib: copy, slot: slot) { Log.info("  note: fixtures from #Preview blocks not loaded (\(why))") }
-            else { try? mine.write(toFile: marker, atomically: true, encoding: .utf8) }
+            if let why = try Patch.live(dylib: copy, slot: slot) {
+                Log.info("  note: fixtures from #Preview blocks not loaded (\(why))")
+                return why
+            }
+            try? mine.write(toFile: marker, atomically: true, encoding: .utf8)
+            return nil
         } catch {
             Log.info("  note: fixtures from #Preview blocks not loaded (\(error))")
+            return "\(error)"
         }
     }
 

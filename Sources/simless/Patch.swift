@@ -102,6 +102,39 @@ enum Patch {
         return parts(deploymentTarget).lexicographicallyPrecedes(parts(RuntimeBuild.iosTarget)) ? RuntimeBuild.iosTarget : deploymentTarget
     }
 
+    /// The fixtures file a dylib for this build compiles, or nil for none. A
+    /// build with the kit always has one (the kit calls `simlessFixtures`). A
+    /// build without it may have none: its fixtures then come from `#Preview`
+    /// blocks only.
+    static func fixturesFile(ws: Workspace, kitInApp: Bool) -> String? {
+        let path = "\(ws.root)/\(ws.config.fixturesFile)"
+        return kitInApp || exists(path) ? path : nil
+    }
+
+    /// The entry file's code: `prelude` at the top level, then the entry point
+    /// that fills the registry `r` with `simlessFixtures` (when the dylib has
+    /// the fixtures file) and `entry`, with `r` and `address` in scope.
+    static func entrySource(appModule: String, kitInApp: Bool, callsFixtures: Bool, prelude: String, entry: String) -> String {
+        """
+        import Foundation
+        \(kitInApp ? "" : "import SimlessRuntime")
+        @testable import \(appModule)
+        \(prelude)
+        // The address crosses into the main actor as an Int (Sendable), so this
+        // compiles under Swift 6 whatever the module's default isolation.
+        @_cdecl("simless_patch_entry")
+        nonisolated public func simless_patch_entry(_ registry: UnsafeMutableRawPointer) {
+            let address = Int(bitPattern: registry)
+            MainActor.assumeIsolated {
+                let pointer = UnsafeRawPointer(bitPattern: address)!
+                let r = Unmanaged<SimlessRegistry>.fromOpaque(pointer).takeUnretainedValue()
+        \(callsFixtures ? "        simlessFixtures(r)" : "")
+        \(entry)
+            }
+        }
+        """
+    }
+
     /// `prelude` is top-level code for the entry file, `entry` runs after
     /// `simlessFixtures` with `r` (the registry) and `address` in scope.
     /// `forNewBuild` is for `up`, which prepares the slot with the current
@@ -114,6 +147,9 @@ enum Patch {
         let dir = dir ?? "\(ws.work)/patches"
         try mkdirp(dir)
         let module = "\(name)\(slot.n)x\(slot.patch + 1)x\(Int(Date().timeIntervalSince1970) % 100000)"
+        // The installed build's mode: the patch binds to the registry it has.
+        let kitInApp = slot.kitInBuild
+        let fixturesFile = fixturesFile(ws: ws, kitInApp: kitInApp)
         let fixtures = "\(ws.root)/\(ws.config.fixturesFile)"
 
         // Which module each file comes from: the app target, or a local package
@@ -141,12 +177,10 @@ enum Patch {
         }
         let effective = distinct.first ?? appSettings
 
-        // The installed build's mode: the patch binds to the registry it has.
-        let kitInApp = slot.kitInBuild
         let imports = sourceHeader(modules: modulesInvolved, kitInApp: kitInApp)
         var sources: [String] = []
         var originals: [String: String] = [:]   // patch copy -> edited file, for error messages
-        for file in [fixtures] + files.filter({ $0 != fixtures }) {
+        for file in (fixturesFile.map { [$0] } ?? []) + files.filter({ $0 != fixtures }) {
             let dst = "\(dir)/\(module)_\(sources.count)_\((file as NSString).lastPathComponent)"
             originals[dst] = file
             let body = try texts[file] ?? String(contentsOfFile: file, encoding: .utf8)
@@ -154,24 +188,8 @@ enum Patch {
             sources.append(dst)
         }
         let entry = "\(dir)/\(module)_entry.swift"
-        try """
-            import Foundation
-            \(kitInApp ? "" : "import SimlessRuntime")
-            @testable import \(settings.moduleName)
-            \(prelude)
-            // The address crosses into the main actor as an Int (Sendable), so this
-            // compiles under Swift 6 whatever the module's default isolation.
-            @_cdecl("simless_patch_entry")
-            nonisolated public func simless_patch_entry(_ registry: UnsafeMutableRawPointer) {
-                let address = Int(bitPattern: registry)
-                MainActor.assumeIsolated {
-                    let pointer = UnsafeRawPointer(bitPattern: address)!
-                    let r = Unmanaged<SimlessRegistry>.fromOpaque(pointer).takeUnretainedValue()
-                    simlessFixtures(r)
-            \(entryCode)
-                }
-            }
-            """.write(toFile: entry, atomically: true, encoding: .utf8)
+        try entrySource(appModule: settings.moduleName, kitInApp: kitInApp, callsFixtures: fixturesFile != nil,
+                        prelude: prelude, entry: entryCode).write(toFile: entry, atomically: true, encoding: .utf8)
         sources.append(entry)
 
         let sdk = try Shell.check(["xcrun", "--sdk", "iphoneos", "--show-sdk-path"]).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -326,7 +344,7 @@ enum Patch {
     /// Returns nil on success, or why live reload isn't available.
     static func live(dylib: String, slot: SlotRecord) throws -> String? {
         if Native.isNative(slot) { return try liveNative(dylib: dylib, slot: slot) }
-        guard let agent = try? Agent.client() else { return "agent not running" }
+        guard let agent = try? Agent.client() else { return "SimlessAgent is not running, and the dfi mode loads dylibs into a host only through it; start it with `simless agent install`" }
         guard let tmp = slot.stats()?["tmp"] as? String else { return "host not running" }
         let name = (dylib as NSString).lastPathComponent
         let placed = try agent.call(["cmd": "place", "src": dylib, "dst": "\(tmp)/\(name)"])

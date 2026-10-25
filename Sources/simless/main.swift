@@ -416,6 +416,9 @@ func runningSlot(_ ws: Workspace) throws -> SlotRecord {
 
 func cmdUp(_ args: Args) throws {
     let ws = try Workspace.load()
+    // Before anything is written: a refused `up` keeps the snapshot of the
+    // build the host runs, so the next `reload` still sees every edit.
+    try ws.checkFixtureSources()
     Cleanup.capCompileCache()
     let t = now()
     let buildStart = Date().timeIntervalSinceReferenceDate
@@ -503,17 +506,27 @@ func cmdUp(_ args: Args) throws {
         try Slots.prepare(slot, ws: ws, settings: settings, embedded: false)
         try Slots.install(slot, ws: ws)
     }
+    // Without the kit, the host's fixtures are all in the previews dylib: it is
+    // built before the host starts, and the launch loads it.
+    if !slot.kitInBuild {
+        previewsBuilt.wait()
+        if let previewsError { throw SimlessError("the fixtures weren't built: \(previewsError)") }
+    }
     try Slots.launch(slot, idleMinutes: ws.idleMinutes)
     previewsBuilt.wait()
+    var notLoaded: String?
     if let previewsError { Log.info("note: fixtures from #Preview blocks weren't built: \(previewsError)") }
-    else { Previews.load(slot) }
+    else { notLoaded = Previews.load(slot) }
     let stats = slot.stats() ?? [:]
+    if !slot.kitInBuild, stats["patch"] as? Int ?? 0 == 0 {
+        throw SimlessError("the host started, but its fixtures weren't loaded into it: \(notLoaded ?? "the host answered no load"); log: \(slot.dir)/host.log")
+    }
     let fixtures = stats["fixtures"] as? [String] ?? []
     if let kit = stats["kit"] as? Int ?? (stats.isEmpty ? nil : 1), kit < requiredKit {
         Log.info("note: \(ws.config.kitFile) is from an older simless; run `simless init` to update it (keeps .simless.json and your fixtures). Until then, features that need the newer kit are off (see the changelog).")
     }
     print("ready in \(secs(t)): \(slot.slotID) on :\(slot.port), \(stats["footprintMB"] ?? "?") MB")
-    print("fixtures (\(fixtures.count)): \(fixtures.isEmpty ? "none; register some in \(ws.config.fixturesFile)" : fixtures.joined(separator: ", "))")
+    print("fixtures (\(fixtures.count)): \(fixtures.isEmpty ? "none; \(ws.noFixturesHint(kitInBuild: slot.kitInBuild))" : fixtures.joined(separator: ", "))")
     if let previews = Previews.summary(ws) { print(previews) }
     print("live reload: \(Agent.liveStatus(probeSlot: slot).map { "off (\($0)); reloads use warm mode" } ?? "on")\(Native.isNative(slot) ? " (native: unsigned, no agent needed)" : "")")
     if let note = skillNote() { print(note) }
@@ -557,7 +570,12 @@ func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws 
         throw SimlessError("--settle needs a newer \(ws.config.kitFile); run `simless init`, then `simless up`")
     }
     let fixtures = target == "all" ? (stats["fixtures"] as? [String] ?? []) : [target]
-    if fixtures.isEmpty { throw SimlessError("no fixtures registered in \(ws.config.fixturesFile)") }
+    if fixtures.isEmpty {
+        if !slot.kitInBuild, stats["patch"] as? Int ?? 0 == 0 {
+            throw SimlessError("no fixtures loaded into the host yet; run `simless up`")
+        }
+        throw SimlessError("no fixtures; \(ws.noFixturesHint(kitInBuild: slot.kitInBuild))")
+    }
     // The host runs the last build or patch that worked: after a failed one, the
     // sources on disk are newer than what renders.
     if !args.flags.contains("--json"), let shown = slot.sources ?? slot.build, shown != ws.currentSourcesID() {
@@ -647,6 +665,7 @@ func fullBuildReason(ws: Workspace, slot: SlotRecord, files: [String],
                      currentRuntime: () -> String = RuntimeBuild.currentDir) -> String? {
     if ws.kitInApp != slot.kitInBuild { return ws.kitInApp ? "SimlessKit added" : "SimlessKit deleted" }
     if files.contains("\(ws.root)/\(ws.config.kitFile)") { return "SimlessKit changed" }
+    if !slot.kitInBuild, !(Previews.manifest(ws)?.dylib.map(exists) ?? false) { return "the fixtures weren't built" }
     if !slot.kitInBuild, RuntimeHost.injectedBuild(slot) != currentRuntime() { return "SimlessRuntime changed" }
     return nil
 }
@@ -723,7 +742,9 @@ func reloadDryRun(_ ws: Workspace, _ args: Args) throws {
     let t = now()
     let s = try slot.map { try Patch.scope(ws: ws, slot: $0, files: files, fixtures: fixtures) }
         ?? PatchScope.files(ws: ws, edited: files, fixtures: fixtures)
-    print("would patch \(s.all.count) file(s) (scoped in \(secs(t))): " + s.all.map { ($0 as NSString).lastPathComponent }.joined(separator: ", "))
+    // An app without the kit may have no fixtures file, which the patch leaves out.
+    let patched = s.all.filter { $0 != "\(ws.root)/\(ws.config.fixturesFile)" || exists($0) }
+    print("would patch \(patched.count) file(s) (scoped in \(secs(t))): " + patched.map { ($0 as NSString).lastPathComponent }.joined(separator: ", "))
     print("  covers: \(s.covered.isEmpty ? "none" : s.covered.joined(separator: ", "))")
     if !s.stale.isEmpty { print("  stale until the next full build: \(s.stale.joined(separator: ", "))") }
 }
