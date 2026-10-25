@@ -24,7 +24,11 @@ enum Calibrate {
 
     static func run(ws: Workspace, slot: SlotRecord, options: Options) throws {
         let t = now()
-        let host = slot.stats() == nil ? try { try Slots.launch(slot, idleMinutes: ws.idleMinutes); return slot }() : slot
+        let host = slot.stats() == nil ? try {
+            let s = try GlobalState.withFreePort(slot)
+            try Slots.launch(s, idleMinutes: ws.idleMinutes)
+            return s
+        }() : slot
         let fixtures = options.only.map { [$0] } ?? (host.stats()?["fixtures"] as? [String] ?? [])
         guard !fixtures.isEmpty else { throw SimlessError("no fixtures registered in \(ws.config.fixturesFile)") }
         if let dir = options.imagesDir { try mkdirp(dir) }
@@ -32,7 +36,8 @@ enum Calibrate {
         let deviceType = options.device ?? simDeviceType
         let udid = try createSimulator(runtime: options.runtime, device: deviceType)
         defer { deleteSimulator(udid) }
-        let simPort = slot.port + 1000
+        // Not a port another worktree's stopped host would listen on again.
+        let simPort = try freePort(avoiding: Set(GlobalState.load().slots.map(\.port)))
         try buildAndLaunch(ws: ws, udid: udid, port: simPort)
         let sim = try LineClient(port: simPort, timeout: 30)
         var mac = try host.client(timeout: 30)
