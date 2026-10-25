@@ -67,7 +67,7 @@ simless skill install                                       # optional: the Clau
 
 # Set up your app (once per repository)
 cd <your-app-repo>
-simless init        # writes .simless.json, the render host kit and a fixtures file
+simless init        # writes .simless.json, the only file simless needs in the repo
 simless up          # builds the app and starts its host
 
 # Use it
@@ -142,13 +142,9 @@ That's all. Older versions ran the app as a signed "Designed for iPad" install, 
 
 ## Set up an app
 
-`simless init` creates:
+`simless init` writes `.simless.json` and nothing else into the app. SimlessRuntime, which simless injects into the render host, serves renders (see [architecture](docs/architecture.md#3-the-render-host-simlesskit-or-simlessruntime)), so the app needs no simless code and no call in its `init()`.
 
-- `.simless.json`
-- `<App>/Simless/SimlessKit.swift`: the render host. It's generated, compiled only in simless builds (`#if SIMLESS`), and does nothing unless simless launches the app. When this file is not there, SimlessRuntime serves renders instead (see [architecture](docs/architecture.md#3-the-render-host-simlesskit-or-simlessruntime)).
-- `<App>/Simless/SimlessFixtures.swift`: your screens. An app without `SimlessKit.swift` may leave this file out too. Its fixtures are then `root` and its `#Preview` blocks, and the repository needs only `.simless.json`.
-
-It also adds one call to your `@main` App's `init()` (pass `--no-hook` to skip that):
+An app that an older simless set up has `<App>/Simless/SimlessKit.swift` and this call in its `@main` App's `init()`:
 
 ```swift
 #if SIMLESS
@@ -156,28 +152,34 @@ SimlessHost.startIfRequested()
 #endif
 ```
 
+`simless init` removes both and prints what it removed. It removes the kit only when its first line is the one simless wrote, and the call only in that exact form (under `#if SIMLESS` or the older `#if DEBUG && os(iOS)`), with the `init()` around it when simless added that too. It removes nothing while other code still uses `SimlessHost` (a call in another form, or a `SimlessHost.isActive` check): then it lists each line, with what to change, and you run it again. It keeps `SimlessFixtures.swift`. `simless calibrate` still needs the kit (see [Calibration](docs/architecture.md#calibration)).
+
 Some fixtures come for free. `root` is the app's first window, as its `@main` App builds it, and every `#Preview` block (and `PreviewProvider`) is a fixture named `<File>.<preview name or number>`, like `LoginView.Error` or `NoteRow.2`. `simless up` compiles them against the build, and `simless render all` lists them after yours. A preview that can't be built outside Xcode is left out, and `up` says which and why.
 
-Register the screens agents should be able to render, each in a deterministic state:
+Register the screens agents should be able to render, each in a deterministic state, in `<App>/Simless/SimlessFixtures.swift` (`kitDir` in `.simless.json` names another folder). The file is optional. simless compiles it into the code it loads into the host. When the app has no kit, the builds that simless runs leave it out of the app. Your own Xcode, CI and archive builds still compile it when it sits in a folder of the app target, so keep the `#if SIMLESS` guard:
 
 ```swift
+#if SIMLESS
+import SwiftUI
+
 @MainActor
 func simlessFixtures(_ r: SimlessRegistry) {
     r.add("Settings") { SettingsView().environmentObject(SettingsStore.preview) }
     r.add("NoteList.empty") { NoteListView(notes: []) }
     r.add("NoteList.long") { NoteListView(notes: .fixture(count: 50)) }
 }
+#endif
 ```
 
-Then run `simless up`. `simless init` puts the kit in a folder Xcode syncs for the app target (Xcode 16's synchronized folders, also when they sit inside classic groups). When the target has none, it says so, and you add the two files to the app target first. Render hosts get no network: every request the app makes through `URLSession` fails as if the Mac were offline, and the render lists what was blocked (see `network` under [Options](#options-in-simlessjson) to allow or stub hosts). If app startup has other side effects a background host shouldn't trigger (an SDK starting up, writing to a shared service), guard them with `SimlessHost.isActive`.
+Then run `simless up`. Render hosts get no network: every request the app makes through `URLSession` fails as if the Mac were offline, and the render lists what was blocked (see `network` under [Options](#options-in-simlessjson) to allow or stub hosts). If app startup has other side effects a background host shouldn't trigger (an SDK starting up, writing to a shared service), guard them with `ProcessInfo.processInfo.arguments.contains("--simless-port")` inside `#if SIMLESS`: simless starts a render host with that argument.
 
 Live reload works out of the box: simless puts each patch in the host's own temp folder and the host loads it, in about 0.2 s after the compile. (The `dfi` mode runs the app in the Mac's app sandbox, where simless can't place files. There, `simless agent install` and Full Disk Access for SimlessAgent take hot reload from about 10 s to about 2 s. [Why it needs this](docs/architecture.md#5-simlessagent-and-its-security-model).)
 
 ## Commands
 
 ```
-simless init [--no-hook]          set up a repo
-      [--template <dir>]          an xcodegen app template instead: kit and config only, no project edits
+simless init                      set up a repo: write .simless.json, remove an older simless's kit and App hook
+      [--template <dir>]          an xcodegen app template instead: no project edits
 simless up [--no-tests] [--json]  build, prepare this worktree's host, start it, and prepare local packages'
                                   tests and the test hosts, so the first `simless test` only runs tests
 simless render <fixture|all>      accessibility tree + issues
@@ -216,7 +218,7 @@ simless version                   version, Xcode and macOS
 
 `--locale hr` relaunches the host with that language and region (about 1 s), so one fixture covers every language. `--text-size ax5` sets the Dynamic Type size the view sees, and text scales with it like on an iPhone. `--settle <ms>` gives a screen time for its async work (`.task`, loads) before the tree is read. Without it, a render that changes after its first read (a List that appears once data loads) is read again until it holds still, and a screen of 5 elements or fewer gets one more look 100 ms later. Either way the render says so.
 
-`simless act Settings tap "Push notifications"` renders the fixture, works it like a finger and a keyboard would, and prints the tree afterwards (`"Push notifications" = "0"`). It uses the same automation as `simless test ui`: a tap is an accessibility activation where the element has an action and a real touch elsewhere, and `type` focuses the field first, so SwiftUI text fields take typing and their bindings update. Steps chain in one call and each one is reported as done or not, with what's on screen when an element isn't found. It needs kit 5 (`simless init`).
+`simless act Settings tap "Push notifications"` renders the fixture, works it like a finger and a keyboard would, and prints the tree afterwards (`"Push notifications" = "0"`). It uses the same automation as `simless test ui`: a tap is an accessibility activation where the element has an action and a real touch elsewhere, and `type` focuses the field first, so SwiftUI text fields take typing and their bindings update. Steps chain in one call and each one is reported as done or not, with what's on screen when an element isn't found. An app that still has `SimlessKit.swift` needs kit 5 or later for it.
 
 `simless test` prints failures and crashes as they happen, with the crash's message and file, and a progress line every 10 s. `simless test all` runs the app's test targets and every local package's, in warm hosts with tests in parallel. A big run is spread over several hosts (`--hosts`), because main-actor tests run one at a time per process. Targets are spread by how long each took in the last run, and a target that takes half again as long as any other gets a host to itself. A target with many classes is split over hosts by class too (up to 6 hosts, half the cores), so an app with one big test target uses the Mac: the first of its hosts runs whatever the others don't, so a class the split didn't see still runs. Those times are kept per repository, so a new worktree or a run after `simless clean` spreads well too. A test that crashes the host or runs longer than `--timeout` (default 600 s, like Xcode, and 120 s with `--agent` or `SIMLESS_AGENT=1`, so an agent doesn't wait out a hung test) is reported with its name and the crash's frames, and a fresh host runs only what didn't finish. A few failures (up to 30) run again alone, and a test that passes then is reported as flaky. A `--skip` that didn't match anything gets a note with the id formats.
 
@@ -232,8 +234,7 @@ A machine that builds many projects as one user, from xcodegen templates, with a
 
 ```sh
 simless doctor --json                   # gate the machine: macOS, Xcode, iOS SDK, free disk ("ok": true)
-simless init --template <template-dir>  # once per app template: writes .simless.json and the kit, edits no project file,
-                                        # prints the App hook and any project.yml change
+simless init --template <template-dir>  # once per app template: writes .simless.json, edits no project file
 # every build, in the project's workspace
 xcodegen generate
 simless up --json                       # the compile step: the app build, its diagnostics, and a host ready to render
@@ -499,7 +500,7 @@ Pixel-exact rendering, system UI that isn't emulated above (StoreKit sheets, pic
 ### Other limits
 
 - **Project types:** `.xcworkspace`, Tuist and pure Swift Package apps aren't supported yet. You need an `.xcodeproj` (anywhere in the repository) with an iOS app target.
-- **Side effects:** the host runs your app's real startup in the background. Its `URLSession` requests are blocked (see `network` in the options), but other side effects aren't: guard SDKs that start up or write somewhere with `SimlessHost.isActive`.
+- **Side effects:** the host runs your app's real startup in the background. Its `URLSession` requests are blocked (see `network` in the options), but other side effects aren't: guard SDKs that start up or write somewhere with `ProcessInfo.processInfo.arguments.contains("--simless-port")`.
 - **Private APIs:** the render host relies on a few private, DEBUG-only Apple APIs (in-process accessibility automation, touch injection, hiding the app, suppressing its windows, and in the dfi mode sandbox extensions for reading the repository). It also relies on macOS running an iOS device binary that's tagged Mac Catalyst. An OS update could break them, and they never ship in release builds.
 
 ## How it works
@@ -508,4 +509,4 @@ Pixel-exact rendering, system UI that isn't emulated above (StoreKit sheets, pic
 
 ## License
 
-Apache-2.0 ([LICENSE](LICENSE)), copyright 2026 Abacus.AI, Inc. The files in `Templates/` (the render-host kit, the fixtures template and the agent skill), which `simless init` and `simless skill install` copy into your app or machine, are licensed under [MIT No Attribution](LICENSES/MIT-0.txt), so you can ship them without notices. See [NOTICE](NOTICE).
+Apache-2.0 ([LICENSE](LICENSE)), copyright 2026 Abacus.AI, Inc. The files in `Templates/` (the render-host kit, the fixtures template and the agent skill), which you can copy into your app and `simless skill install` links into your machine, are licensed under [MIT No Attribution](LICENSES/MIT-0.txt), so you can ship them without notices. See [NOTICE](NOTICE).

@@ -4,7 +4,10 @@
 // without warranty of any kind.
 
 // Fixtures for `simless render`: each one builds a screen in a deterministic state.
-// Created by `simless init`. This file is yours; edit it freely.
+// Copy it to <App>/Simless/ (or the folder `kitDir` in .simless.json names). It is optional.
+// This file is yours; edit it freely. simless compiles it into the code it loads
+// into the render host. When the app has no SimlessKit.swift, the builds simless
+// runs leave it out of the app. Other builds of the app compile it, so keep the guard.
 //
 // Hot reload recompiles this file together with the edited view files, so
 // fixtures always render the latest code. Keep it to view construction:

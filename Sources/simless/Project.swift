@@ -10,7 +10,7 @@ struct Config: Codable {
     var scheme: String
     var appTarget: String
     var testTarget: String        // an app-hosted unit-test bundle ("" for none; the dfi mode installs slots through it)
-    var kitDir: String            // where SimlessKit.swift + SimlessFixtures.swift live
+    var kitDir: String?           // where SimlessFixtures.swift (and an older app's SimlessKit.swift) live; default <first sourceDir>/Simless
     var sourceDirs: [String]      // scanned for edited files on `simless reload`
     var device: String = "iphone" // default canvas: iphone | ipad
     var buildConcurrency: Int?    // max simultaneous full builds across all agents
@@ -59,8 +59,10 @@ struct Config: Codable {
         var device: String?           // simulator device type (default "iPhone 17 Pro")
     }
 
-    var kitFile: String { "\(kitDir)/SimlessKit.swift" }
-    var fixturesFile: String { "\(kitDir)/SimlessFixtures.swift" }
+    /// `kitDir`, or `Simless` in the first source folder.
+    var fixturesDir: String { kitDir ?? "\(sourceDirs.first.map { $0 == "." ? "" : $0 + "/" } ?? "")Simless" }
+    var kitFile: String { "\(fixturesDir)/SimlessKit.swift" }
+    var fixturesFile: String { "\(fixturesDir)/SimlessFixtures.swift" }
 }
 
 /// One checkout (repository or git worktree) of an app.
@@ -88,6 +90,14 @@ struct Workspace {
         "SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) \(Self.condition)",
     ]
     static let condition = "SIMLESS"
+
+    /// Without the kit, the app defines no SimlessRegistry, and only the
+    /// dylibs simless compiles use the fixtures file. In a folder Xcode syncs
+    /// for the app target, the app build would compile it too, and fail: the
+    /// build leaves out each source file with its name.
+    static func fixturesExclusion(kitInApp: Bool, fixturesFile: String) -> [String] {
+        kitInApp ? [] : ["EXCLUDED_SOURCE_FILE_NAMES=$(inherited) \((fixturesFile as NSString).lastPathComponent)"]
+    }
 
     /// One xcodebuild at a time in this worktree's build folder.
     func withBuildFolder<T>(_ body: () throws -> T) throws -> T {
@@ -281,8 +291,11 @@ struct Workspace {
 
     /// Full build of the app + unit-test bundle, unsigned (slots are signed by
     /// simless: ad hoc in the native mode, with the team wildcard profile in dfi).
-    func build() throws {
+    /// Builds the app. `kitInApp` is the mode the build records (`up` reads it
+    /// as the build starts).
+    func build(kitInApp: Bool) throws {
         let project = try buildProject()
+        let settings = Self.buildSettings + Self.fixturesExclusion(kitInApp: kitInApp, fixturesFile: config.fixturesFile)
         try mkdirp(work)
         // Lets garbage collection find build caches whose worktree is gone.
         try root.write(toFile: "\(work)/worktree.txt", atomically: true, encoding: .utf8)
@@ -294,7 +307,7 @@ struct Workspace {
                 try Cleanup.retryingPoisonedCache {
                     try Shell.run(["xcodebuild", action,
                                  "-project", project, "-scheme", config.scheme, "-configuration", "Debug",
-                                 "-destination", destination, "-derivedDataPath", derivedData] + Self.buildSettings,
+                                 "-destination", destination, "-derivedDataPath", derivedData] + settings,
                                 cwd: root, logPath: buildLog)
                 }
             }

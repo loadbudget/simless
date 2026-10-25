@@ -8,7 +8,7 @@ let version = "0.7.2"
 let usage = """
 simless: fast, headless, simulator-free SwiftUI checks for AI agents.
 
-  simless init [--no-hook] [--template <dir>]         set up this repo (.simless.json, SimlessKit, fixtures, App.init hook)
+  simless init [--template <dir>]  set up this repo (.simless.json); removes the SimlessKit and App hook older versions added
   simless up [--no-tests]          build for iOS, install this worktree's slot (unsigned), start its host;
         also prepares local packages' tests and the test hosts (--no-tests skips that)
   simless render <fixture|all>     render and print the accessibility tree + issues
@@ -108,51 +108,17 @@ func cmdInit(_ args: Args) throws {
             : targets.first { $0.hasSuffix("Tests") && !$0.hasSuffix("UITests") }) ?? ""
     // The app's sources usually sit next to the project, in a folder named like the target.
     // Else (a generated project, say, with everything under Sources/) the top
-    // folder of the one holding the `@main` App: the kit must sit among the
-    // files the target compiles.
+    // folder of the one holding the `@main` App.
     let sourceDir = fm.fileExists(atPath: "\(root)/\(inProjectDir(appTarget))") ? inProjectDir(appTarget)
         : mainAppFolder(in: projectDir.isEmpty ? root : "\(root)/\(projectDir)").map(inProjectDir)
         ?? (projectDir.isEmpty ? "." : projectDir)
-    // The kit must be compiled by the app target: in a synchronized folder of
-    // the target's (checked for the folder it goes into, since a classic group
-    // can hold synchronized subfolders), or else added to the target by hand.
-    let pbx = (try? String(contentsOfFile: "\(root)/\(project)/project.pbxproj", encoding: .utf8)) ?? ""
-    let synchronized = PBX.synchronizedFolders(target: appTarget, pbx: pbx).map(inProjectDir)
-    func isSynchronized(_ dir: String) -> Bool { synchronized.contains { dir == $0 || dir.hasPrefix($0 + "/") || $0 == "." } }
-    var kitDir = args.values["--kit-dir"] ?? (sourceDir == "." ? "Simless" : "\(sourceDir)/Simless")
-    if args.values["--kit-dir"] == nil, !isSynchronized(kitDir) {
-        // One of the target's synchronized folders, inside its sources when it can be.
-        let inside = synchronized.filter { sourceDir == "." || $0.hasPrefix(sourceDir + "/") }
-        let pick = inside.first { ($0 as NSString).lastPathComponent == "Debug" }
-            ?? (inside.isEmpty ? synchronized : inside).min { ($0.count, $0) < ($1.count, $1) }
-        if let pick { kitDir = "\(pick)/Simless" }
-    }
-
     // Local Swift packages the project references: their views can be hot-reloaded too.
     let packages = Workspace.localPackages(root: root, project: project)
 
-    // An existing .simless.json is kept (re-running init updates SimlessKit);
-    // --force writes a fresh one.
-    let configPath = "\(root)/\(Workspace.configName)"
-    let existing = args.flags.contains("--force") ? nil : (try? Workspace.load(at: root))?.config
-    let config = existing ?? Config(project: project, scheme: scheme, appTarget: appTarget, testTarget: testTarget,
-                                    kitDir: kitDir, sourceDirs: [sourceDir], packages: packages.isEmpty ? nil : packages)
-    if existing == nil {
-        let enc = JSONEncoder()
-        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try enc.encode(config).write(to: URL(fileURLWithPath: configPath))
-    }
-
-    try mkdirp("\(root)/\(kitDir)")
-    let kit = "\(root)/\(config.kitFile)"
-    try? fm.removeItem(atPath: kit)
-    try fm.copyItem(atPath: "\(Paths.toolRoot)/Templates/SimlessKit.swift", toPath: kit)
-    let fixtures = "\(root)/\(config.fixturesFile)"
-    let newFixtures = !fm.fileExists(atPath: fixtures)
-    if newFixtures {
-        try fm.copyItem(atPath: "\(Paths.toolRoot)/Templates/SimlessFixtures.swift", toPath: fixtures)
-    }
-    let movedFixtures = newFixtures ? false : try moveOldGuard(in: fixtures, followedBy: .fixtures)
+    let (config, kept, removed, blocked) = try initFiles(
+        root: root, force: args.flags.contains("--force"),
+        fresh: Config(project: project, scheme: scheme, appTarget: appTarget, testTarget: testTarget,
+                      kitDir: args.values["--kit-dir"], sourceDirs: [sourceDir], packages: packages.isEmpty ? nil : packages))
 
     // The generated build-variant project and test plans stay out of git
     // without touching .gitignore.
@@ -168,25 +134,18 @@ func cmdInit(_ args: Args) throws {
         }
     }
 
-    let synced = isSynchronized(config.kitDir)
-    let hook = args.flags.contains("--no-hook") ? nil : try insertHook(in: "\(root)/\(sourceDir)")
-    let configLine = existing != nil ? "kept \(Workspace.configName) (--force rewrites it)"
+    let configLine = kept ? "kept \(Workspace.configName) (--force rewrites it)"
         : "wrote \(Workspace.configName): project \(project), scheme \(scheme), app \(appTarget), tests \(testTarget.isEmpty ? "none" : testTarget)\(packages.isEmpty ? "" : ", packages " + packages.joined(separator: ", "))"
+    print(configLine)
+    for line in removed { print(line) }
+    try stopIfBlocked(blocked)
+    let fixtures = exists("\(root)/\(config.fixturesFile)")
     print("""
-        \(configLine)
-        wrote \(config.kitFile)\(newFixtures ? " and \(config.fixturesFile)" : "")\(movedFixtures ? "; moved \(config.fixturesFile) under #if \(Workspace.condition)" : "")
 
         Next:
-          1. \(synced ? "Both files are in a synchronized folder of \(appTarget), so Xcode picks them up."
-                : "\(config.kitDir) isn't in a folder Xcode syncs for \(appTarget): add both files to the \(appTarget) target (in Xcode: File > Add Files, with \(appTarget) checked under Targets)\(synchronized.isEmpty ? "" : ", or move the folder into one of \(synchronized.prefix(5).joined(separator: ", "))"). Until then, `simless up` fails with \"cannot find 'SimlessHost' in scope\".")
-          2. \(hook.map { "App hook: \($0)" } ?? """
-        In your App's init(), add:
-                 #if SIMLESS
-                 SimlessHost.startIfRequested()
-                 #endif
-        """)
-          3. Register screens in \((config.fixturesFile as NSString).lastPathComponent), then run `simless up`.
-          4. Agents: `simless skill install` (once per machine) teaches Claude Code the workflow.
+          1. Run `simless up`. The fixtures are \(fixtures ? "those in \(config.fixturesFile), " : "")the App's root view and the #Preview blocks.
+          2. \(fixtures ? "Register more screens in \(config.fixturesFile)." : "For more screens, or screens in a set state, add \(config.fixturesFile) (optional; see the README).")
+          3. Agents: `simless skill install` (once per machine) teaches Claude Code the workflow.
         """)
 }
 
@@ -234,10 +193,8 @@ func mainAppFolder(in dir: String) -> String? {
 }
 
 /// `simless init --template <dir>`: an xcodegen app template, whose project
-/// is generated again on every build. It writes `.simless.json` and the kit
-/// into the template's sources and touches no project file. It prints the
-/// App hook to add, and the `project.yml` change when the kit is outside the
-/// app target's sources.
+/// is generated again on every build. It writes `.simless.json` and touches
+/// no project file.
 func initTemplate(_ dir: String, _ args: Args) throws {
     let root = URL(fileURLWithPath: dir, relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)).standardizedFileURL.path
     guard exists("\(root)/project.yml") else { throw SimlessError("\(dir) has no project.yml (`--template` takes an xcodegen app template)") }
@@ -260,118 +217,27 @@ func initTemplate(_ dir: String, _ args: Args) throws {
     }
     let testTarget = targets.first { ($0.value["type"] as? String) == "bundle.unit-test" }?.key ?? ""
     let sourceDirs = sources(app)
-    guard let sourceDir = sourceDirs.first else { throw SimlessError("\(appTarget) lists no sources in project.yml") }
-    let kitDir = args.values["--kit-dir"] ?? "\(sourceDir)/Simless"
+    guard !sourceDirs.isEmpty else { throw SimlessError("\(appTarget) lists no sources in project.yml") }
     let packages = (spec["packages"] as? [String: [String: Any]] ?? [:]).compactMap { $0.value["path"] as? String }.sorted()
 
-    let configPath = "\(root)/\(Workspace.configName)"
-    let keep = exists(configPath) && !args.flags.contains("--force")
-    let config = Config(project: "\(name).xcodeproj", scheme: appTarget, appTarget: appTarget, testTarget: testTarget,
-                        kitDir: kitDir, sourceDirs: sourceDirs, packages: packages.isEmpty ? nil : packages)
-    if !keep {
-        let enc = JSONEncoder()
-        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try enc.encode(config).write(to: URL(fileURLWithPath: configPath))
-    }
-    try mkdirp("\(root)/\(kitDir)")
-    try? FileManager.default.removeItem(atPath: "\(root)/\(config.kitFile)")
-    try FileManager.default.copyItem(atPath: "\(Paths.toolRoot)/Templates/SimlessKit.swift", toPath: "\(root)/\(config.kitFile)")
-    let newFixtures = !exists("\(root)/\(config.fixturesFile)")
-    if newFixtures { try FileManager.default.copyItem(atPath: "\(Paths.toolRoot)/Templates/SimlessFixtures.swift", toPath: "\(root)/\(config.fixturesFile)") }
-    let movedFixtures = newFixtures ? false : try moveOldGuard(in: "\(root)/\(config.fixturesFile)", followedBy: .fixtures)
+    let (_, kept, removed, blocked) = try initFiles(
+        root: root, force: args.flags.contains("--force"),
+        fresh: Config(project: "\(name).xcodeproj", scheme: appTarget, appTarget: appTarget, testTarget: testTarget,
+                      kitDir: args.values["--kit-dir"], sourceDirs: sourceDirs, packages: packages.isEmpty ? nil : packages))
+    print("\(kept ? "kept" : "wrote") \(Workspace.configName): project \(name).xcodeproj, app \(appTarget), tests \(testTarget.isEmpty ? "none" : testTarget)")
+    for line in removed { print(line) }
+    try stopIfBlocked(blocked)
+}
 
-    let compiled = sourceDirs.contains { kitDir == $0 || kitDir.hasPrefix($0 + "/") }
-    let appFile: String? = {
-        guard let e = FileManager.default.enumerator(atPath: "\(root)/\(sourceDir)") else { return nil }
-        while let rel = e.nextObject() as? String {
-            guard rel.hasSuffix(".swift"), let text = try? String(contentsOfFile: "\(root)/\(sourceDir)/\(rel)", encoding: .utf8),
-                  text.range(of: #"@main\s+struct\s+\w+\s*:\s*([\w.]+\s*,\s*)*App\b"#, options: .regularExpression) != nil else { continue }
-            return "\(sourceDir)/\(rel)"
-        }
-        return nil
-    }()
-    let hooked = appFile.flatMap { try? String(contentsOfFile: "\(root)/\($0)", encoding: .utf8) }?.contains("SimlessHost.startIfRequested()") == true
-    let movedHook = !hooked ? false : try moveOldGuard(in: "\(root)/\(appFile!)", followedBy: .hook)
-    print("""
-        \(keep ? "kept" : "wrote") \(Workspace.configName): project \(name).xcodeproj, app \(appTarget), tests \(testTarget.isEmpty ? "none" : testTarget)
-        wrote \(config.kitFile)\(newFixtures ? " and \(config.fixturesFile)" : "")\(movedFixtures ? "; moved \(config.fixturesFile) under #if \(Workspace.condition)" : "")
+/// Stops init when it left the kit and the App hook: code still uses SimlessHost.
+func stopIfBlocked(_ blocked: [String]) throws {
+    guard !blocked.isEmpty else { return }
+    fflush(stdout)
+    throw SimlessError("""
+        changed no app file: the app still uses SimlessHost, which only SimlessKit.swift defines. \
+        Fix each line below, then run `simless init` again.
+        \(blocked.map { "  " + $0 }.joined(separator: "\n"))
         """)
-    if compiled {
-        print("project.yml: nothing to add, \(kitDir) is inside \(appTarget)'s sources (\(sourceDirs.joined(separator: ", ")))")
-    } else {
-        print("""
-            project.yml: add the kit to \(appTarget)'s sources:
-
-              targets:
-                \(appTarget):
-                  sources:
-                    - path: \(kitDir)
-            """)
-    }
-    if hooked {
-        print(movedHook ? "App hook: moved under #if \(Workspace.condition) in \(appFile!)" : "App hook: already in \(appFile!)")
-    } else {
-        print("""
-            App hook: add this to the App's init()\(appFile.map { " in \($0)" } ?? ""), so the app answers simless:
-
-                #if SIMLESS
-                SimlessHost.startIfRequested()
-                #endif
-            """)
-    }
-}
-
-/// What follows the old guard: the App hook, or the fixtures file's imports.
-enum OldGuarded: String {
-    case hook = #"\s*\n\s*SimlessHost\.startIfRequested\(\)"#
-    case fixtures = #"[ \t]*\n(?:\s*\n)*import\b"#
-}
-
-/// Kits before `#if SIMLESS` put the App hook and the fixtures file under
-/// `#if DEBUG && os(iOS)`. The kit no longer compiles in a plain Debug build,
-/// so neither may they. Moves each such guard in `path` that `followedBy`
-/// matches right after to `#if SIMLESS`, and returns whether it moved one.
-func moveOldGuard(in path: String, followedBy: OldGuarded) throws -> Bool {
-    guard let s = try? String(contentsOfFile: path, encoding: .utf8) else { return false }
-    let text = NSMutableString(string: s)
-    let oldGuard = try! NSRegularExpression(pattern: #"#if DEBUG && os\(iOS\)("# + followedBy.rawValue + ")")
-    guard oldGuard.replaceMatches(in: text, range: NSRange(location: 0, length: text.length),
-                                  withTemplate: "#if \(Workspace.condition)$1") > 0 else { return false }
-    try (text as String).write(toFile: path, atomically: true, encoding: .utf8)
-    return true
-}
-
-/// Adds `SimlessHost.startIfRequested()` to the `@main` App's init().
-/// Returns what it did, or nil when it couldn't find a safe place.
-func insertHook(in sourceDir: String) throws -> String? {
-    let call = "SimlessHost.startIfRequested()"
-    func block(_ indent: String) -> String {
-        ["#if \(Workspace.condition)", call, "#endif"].map { indent + $0 + "\n" }.joined()
-    }
-    guard let e = FileManager.default.enumerator(atPath: sourceDir) else { return nil }
-    while let rel = e.nextObject() as? String {
-        guard rel.hasSuffix(".swift"), !rel.contains("Simless/") else { continue }
-        let path = "\(sourceDir)/\(rel)"
-        guard var s = try? String(contentsOfFile: path, encoding: .utf8),
-              let decl = s.range(of: #"@main\s+struct\s+\w+\s*:\s*([\w.]+\s*,\s*)*App\b[^{]*\{"#, options: .regularExpression)
-        else { continue }
-        if s.contains(call) {
-            return try moveOldGuard(in: path, followedBy: .hook)
-                ? "moved under #if \(Workspace.condition) in \(rel)" : "already present in \(rel)"
-        }
-        // An existing init(): add the call as its first statement.
-        if let initRange = s.range(of: #"\n([ \t]*)init\(\)\s*\{[ \t]*\n"#, options: .regularExpression, range: decl.upperBound..<s.endIndex) {
-            let indent = String(s[initRange].dropFirst().prefix { $0 == " " || $0 == "\t" }) + "    "
-            s.insert(contentsOf: block(indent), at: initRange.upperBound)
-            try s.write(toFile: path, atomically: true, encoding: .utf8)
-            return "added to init() in \(rel)"
-        }
-        // No init(): add one right after the declaration.
-        s.insert(contentsOf: "\n    init() {\n" + block("        ") + "    }\n", at: decl.upperBound)
-        try s.write(toFile: path, atomically: true, encoding: .utf8)
-        return "added an init() to the App in \(rel)"
-    }
-    return nil
 }
 
 func cmdSkill(_ args: Args) throws {
@@ -440,7 +306,7 @@ func cmdUp(_ args: Args) throws {
     let packageBuild = DispatchGroup()
     defer { packageBuild.wait() }
     DispatchQueue.global().async(group: packageBuild) { RuntimeBuild.prebuild() }
-    do { try ws.build() } catch {
+    do { try ws.build(kitInApp: kitInApp) } catch {
         // The host still runs the last build that worked: the next `simless
         // reload` compares with its sources and knows its previews.
         ws.restoreSnapshot(previousSnapshot)
@@ -522,8 +388,11 @@ func cmdUp(_ args: Args) throws {
         throw SimlessError("the host started, but its fixtures weren't loaded into it: \(notLoaded ?? "the host answered no load"); log: \(slot.dir)/host.log")
     }
     let fixtures = stats["fixtures"] as? [String] ?? []
-    if let kit = stats["kit"] as? Int ?? (stats.isEmpty ? nil : 1), kit < requiredKit {
-        Log.info("note: \(ws.config.kitFile) is from an older simless; run `simless init` to update it (keeps .simless.json and your fixtures). Until then, features that need the newer kit are off (see the changelog).")
+    // Only a kit in the app can be older than this simless after `up`: the
+    // runtime `up` just gave the slot is this simless's (its record covers
+    // later launches, see `RuntimeHost.keepsInjectedRuntime`).
+    if slot.kitInBuild, let kit = stats["kit"] as? Int ?? (stats.isEmpty ? nil : 1), kit < requiredKit {
+        Log.info("note: \(ws.config.kitFile) is from an older simless. `simless init` removes it and its App hook (keeps .simless.json and your fixtures), and SimlessRuntime then serves renders. Until then, features that need a newer render server are off (see the changelog).")
     }
     print("ready in \(secs(t)): \(slot.slotID) on :\(slot.port), \(stats["footprintMB"] ?? "?") MB")
     print("fixtures (\(fixtures.count)): \(fixtures.isEmpty ? "none; \(ws.noFixturesHint(kitInBuild: slot.kitInBuild))" : fixtures.joined(separator: ", "))")
@@ -541,10 +410,19 @@ func cmdRender(_ args: Args) throws {
     try render(slot: slot, target: target, args: args, ws: ws)
 }
 
-/// SimlessKit version this simless needs for every feature (see `kitVersion` in the kit).
+/// Render protocol version this simless needs for every feature (see
+/// `kitVersion` in the kit and in Runtime/RenderHost.swift).
 let requiredKit = 5
-/// The kit each feature first needs (older kits keep working without it).
+/// The version each feature first needs (older kits keep working without it).
 let localeKit = 3, settleKit = 4, actKit = 5
+
+/// Why `feature` is off on this host: its render server speaks an older
+/// protocol. The kit in the app, or the runtime the slot injects.
+func olderServer(_ feature: String, ws: Workspace, slot: SlotRecord) -> SimlessError {
+    slot.kitInBuild
+        ? SimlessError("\(feature) needs a newer render server than \(ws.config.kitFile); run `simless init` (it removes the kit, and SimlessRuntime serves renders), then `simless up`")
+        : SimlessError("\(feature) needs a newer SimlessRuntime than the host runs; run `simless up`")
+}
 
 func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws {
     if let size = args.values["--text-size"], !Render.textSizes.contains(size) {
@@ -558,7 +436,7 @@ func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws 
     var stats = slot.stats() ?? [:]
     if stats["locale"] as? String != locale {
         if locale != nil, (stats["kit"] as? Int ?? 1) < localeKit {
-            throw SimlessError("--locale needs a newer \(ws.config.kitFile); run `simless init`, then `simless up`")
+            throw olderServer("--locale", ws: ws, slot: slot)
         }
         if locale != nil || stats["locale"] != nil {
             Slots.stop(slot)
@@ -567,7 +445,7 @@ func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws 
         }
     }
     if (args.values["--settle"].flatMap(Double.init) ?? ws.config.settle ?? 0) > 0, (stats["kit"] as? Int ?? 1) < settleKit {
-        throw SimlessError("--settle needs a newer \(ws.config.kitFile); run `simless init`, then `simless up`")
+        throw olderServer("--settle", ws: ws, slot: slot)
     }
     let fixtures = target == "all" ? (stats["fixtures"] as? [String] ?? []) : [target]
     if fixtures.isEmpty {

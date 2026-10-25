@@ -4,11 +4,11 @@ A small SwiftUI app whose screens cover common UI patterns: a welcome screen pin
 
 It's also a minimal example of a project set up for simless:
 
-- `SimlessDemoApp.swift` calls `SimlessHost.startIfRequested()` in `init()`.
+- `SimlessDemoApp.swift` calls `SimlessHost.startIfRequested()` in `init()`, as older `simless init` runs wrote it. The demo keeps it and the kit for `simless calibrate`. `simless init` would remove both.
 - `SimlessDemo/Simless/SimlessFixtures.swift` registers each screen with fixed sample data (`DemoData.swift`).
 - `SimlessDemo/Simless/SimlessKit.swift` is the kit from `Templates/`, kept identical by CI.
 - `SimlessDemoTests` is the app-hosted unit-test target simless installs hosts through (Swift Testing).
-- `.simless.json` is the config `simless init` would write.
+- `.simless.json` is the config an older `simless init` wrote. A new one has no `kitDir`, since `SimlessDemo/Simless` is the default.
 
 ## Try it
 
