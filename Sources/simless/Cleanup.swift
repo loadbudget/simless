@@ -314,4 +314,35 @@ enum Cleanup {
             print("removed this worktree's host, slot and build cache")
         }
     }
+
+    /// `simless clean --worktree <path>`: one worktree's hosts, slots and build
+    /// cache, found by its path, so it works after the worktree is removed.
+    static func clean(worktree path: String) throws {
+        let root = canonicalPath(path)
+        // A path spelled unlike the worktree's own root has no folder: say so,
+        // rather than report a cleanup that left its hosts running.
+        guard exists(Paths.workDir(forWorktree: root)) else {
+            throw SimlessError("simless has nothing for \(root); pass the folder that holds \(Workspace.configName)")
+        }
+        try withLock(GlobalState.lockName(forWorktree: root)) {
+            for slot in GlobalState.load(worktree: root).slots { removeSlot(slot) }
+            try? FileManager.default.removeItem(atPath: Paths.workDir(forWorktree: root))
+        }
+        // A config that doesn't load throws, so generated files don't stay unreported.
+        if exists("\(root)/\(Workspace.configName)") { removeGenerated(ws: try Workspace.load(at: root)) }
+        print("removed the hosts, slots and build cache of \(root)")
+    }
+}
+
+/// `path` as git names a worktree: absolute, with symlinks resolved. A part
+/// that no longer exists is kept as written, under its resolved parent.
+func canonicalPath(_ path: String) -> String {
+    let p = URL(fileURLWithPath: path).standardizedFileURL.path
+    if let r = realpath(p, nil) {
+        defer { free(r) }
+        return String(cString: r)
+    }
+    let parent = (p as NSString).deletingLastPathComponent
+    guard parent != p else { return p }
+    return (canonicalPath(parent) as NSString).appendingPathComponent((p as NSString).lastPathComponent)
 }
