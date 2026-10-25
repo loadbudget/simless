@@ -3,10 +3,11 @@
 
 import Foundation
 
-/// Just enough of a project.pbxproj to know which folders Xcode compiles
-/// straight from disk: the synchronized folders (Xcode 16+) a target lists.
-/// A synchronized folder can sit inside classic groups, and its `path` is then
-/// relative to its parent group, so paths are resolved through the group tree.
+/// Just enough of a project.pbxproj to know what a target compiles: the
+/// synchronized folders (Xcode 16+) it lists, and the files of its Sources
+/// build phase, and the package products it links.
+/// A synchronized folder or a file can sit inside classic groups, and its `path`
+/// is then relative to its parent group, so paths are resolved through the group tree.
 enum PBX {
     struct Object {
         let isa: String
@@ -56,17 +57,109 @@ enum PBX {
     /// The synchronized folders `target` compiles, relative to the project's directory.
     static func synchronizedFolders(target: String, pbx: String) -> [String] {
         let objects = objects(pbx)
+        guard let t = nativeTarget(target, objects) else { return [] }
+        return list("fileSystemSynchronizedGroups", t.body).compactMap(pathResolver(objects))
+    }
+
+    /// The files in `target`'s Sources build phase: the sources of a classic
+    /// group, which Xcode lists one by one. A path is relative to the project's
+    /// directory, or absolute for a file outside it (`<absolute>`).
+    static func sourceFiles(target: String, pbx: String) -> [String] {
+        sourceRefs(target: target, pbx: pbx).compactMap(\.path)
+    }
+
+    /// The Swift files of `target`'s Sources build phase that no path on disk
+    /// can be given for, such as a generated file in `DERIVED_FILE_DIR`, with
+    /// their `sourceTree`.
+    static func unresolvedSwiftFiles(target: String, pbx: String) -> [(name: String, sourceTree: String)] {
+        sourceRefs(target: target, pbx: pbx).filter { $0.path == nil && $0.name.hasSuffix(".swift") }.map { ($0.name, $0.sourceTree) }
+    }
+
+    /// Every native target, by name.
+    static func targetNames(pbx: String) -> [String] {
+        objects(pbx).values.filter { $0.isa == "PBXNativeTarget" }.compactMap { field("name", $0.body) }.sorted()
+    }
+
+    private static func sourceRefs(target: String, pbx: String) -> [(name: String, sourceTree: String, path: String?)] {
+        let objects = objects(pbx)
+        guard let t = nativeTarget(target, objects) else { return [] }
+        let fullPath = pathResolver(objects)
+        let phases = list("buildPhases", t.body).compactMap { objects[$0] }.filter { $0.isa == "PBXSourcesBuildPhase" }
+        return phases.flatMap { list("files", $0.body) }.compactMap { buildFile in
+            // A fileRef value reads `<id> /* <name> */`; a package product has a productRef instead.
+            guard let ref = objects[buildFile].flatMap({ field("fileRef", $0.body) })?.split(separator: " ").first,
+                  let file = objects[String(ref)] else { return nil }
+            return (field("name", file.body) ?? file.path ?? String(ref), file.sourceTree ?? "", fullPath(String(ref)))
+        }
+    }
+
+    /// A Swift package product that a target links, and the package the
+    /// project file gives for it.
+    struct PackageProduct: Equatable {
+        enum Package: Equatable {
+            /// An XCLocalSwiftPackageReference: its `relativePath`, relative to the project's directory.
+            case local(String)
+            /// An XCRemoteSwiftPackageReference: its `repositoryURL`.
+            case remote(String)
+            /// No package named, as XcodeGen writes it: Xcode looks for the
+            /// product in the project's local packages.
+            case unnamed
+            /// A package reference of another kind, or one with no object: its isa or id.
+            case unknown(String)
+        }
+        let name: String
+        let package: Package
+    }
+
+    /// The package products in `target`'s `packageProductDependencies`, in the project file's order.
+    static func packageProducts(target: String, pbx: String) -> [PackageProduct] {
+        let objects = objects(pbx)
+        guard let t = nativeTarget(target, objects) else { return [] }
+        return list("packageProductDependencies", t.body).map { id in
+            // An entry with no object, or no product name, is named by its id.
+            guard let dep = objects[id] else { return PackageProduct(name: id, package: .unknown("no object \(id)")) }
+            guard let name = field("productName", dep.body) else { return PackageProduct(name: id, package: .unknown("no productName in \(id)")) }
+            // A package value reads `<id> /* <kind> "<name>" */`.
+            guard let ref = field("package", dep.body)?.split(separator: " ").first.map(String.init) else {
+                return PackageProduct(name: name, package: .unnamed)
+            }
+            let package = objects[ref]
+            switch package?.isa {
+            case "XCLocalSwiftPackageReference":
+                return PackageProduct(name: name, package: package.flatMap { field("relativePath", $0.body) }.map { .local($0) } ?? .unknown(ref))
+            case "XCRemoteSwiftPackageReference":
+                return PackageProduct(name: name, package: .remote(package.flatMap { field("repositoryURL", $0.body) } ?? ref))
+            default:
+                return PackageProduct(name: name, package: .unknown(package?.isa ?? ref))
+            }
+        }
+    }
+
+    private static func nativeTarget(_ name: String, _ objects: [String: Object]) -> Object? {
+        objects.values.first { $0.isa == "PBXNativeTarget" && field("name", $0.body) == name }
+    }
+
+    /// An object's path relative to the project's directory, through the groups
+    /// that hold it, or its absolute path. The project's `projectDirPath`, when
+    /// set, is where `SOURCE_ROOT` and the main group start.
+    private static func pathResolver(_ objects: [String: Object]) -> (String) -> String? {
         var parent: [String: String] = [:]
         for (id, o) in objects { for c in o.children { parent[c] = id } }
-        func fullPath(_ id: String, depth: Int = 0) -> String? {
+        let base = objects.values.first { $0.isa == "PBXProject" }.flatMap { field("projectDirPath", $0.body) } ?? ""
+        func join(_ a: String, _ b: String) -> String { a.isEmpty ? b : b.isEmpty ? a : "\(a)/\(b)" }
+        func walk(_ id: String, depth: Int) -> String? {
             guard depth < 64, let o = objects[id] else { return nil }
-            if o.sourceTree == "SOURCE_ROOT" { return o.path ?? "" }
-            guard o.sourceTree == "<group>" else { return nil }
-            let up = parent[id].flatMap { fullPath($0, depth: depth + 1) } ?? ""
-            guard let p = o.path, !p.isEmpty else { return up }
-            return up.isEmpty ? p : "\(up)/\(p)"
+            switch o.sourceTree {
+            case "<absolute>": return o.path
+            case "SOURCE_ROOT": return join(base, o.path ?? "")
+            case "<group>":
+                let up = parent[id].map { walk($0, depth: depth + 1) } ?? base
+                guard let up else { return nil }
+                if let p = o.path, p.hasPrefix("/") { return p }
+                return join(up, o.path ?? "")
+            default: return nil
+            }
         }
-        guard let t = objects.values.first(where: { $0.isa == "PBXNativeTarget" && field("name", $0.body) == target }) else { return [] }
-        return list("fileSystemSynchronizedGroups", t.body).compactMap { fullPath($0) }
+        return { walk($0, depth: 0) }
     }
 }

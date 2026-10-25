@@ -34,7 +34,7 @@ enum Patch {
             dylib = try compile(ws: ws, slot: slot, settings: settings, files: scope.all, texts: scope.texts)
         } else {
             // Previews the reload renders compile into it, from their files.
-            let p = Previews.patchCode(ws: ws, names: scope.previews, kept: scope.kept, texts: scope.texts)
+            let p = try Previews.patchCode(ws: ws, names: scope.previews, kept: scope.kept, texts: scope.texts)
             dylib = try compile(ws: ws, slot: slot, settings: settings, files: scope.all, texts: p.texts, prelude: p.prelude, entry: p.entry)
         }
         Cleanup.prunePatches(ws: ws)

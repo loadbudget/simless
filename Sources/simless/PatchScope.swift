@@ -255,6 +255,7 @@ enum PatchScope {
         var moduleOf: [String: String] = [:]    // path -> module; the app module when missing
         var visible: [String: Set<String>] = [:] // module -> modules it can import
         var appModule = "App"
+        var root = ""                           // the worktree, for paths in messages
         var fixturesPath = "SimlessFixtures.swift"
         var fixturesText = ""
         var before: [String: String] = [:]      // edited path -> its text as of the last full build
@@ -266,6 +267,7 @@ enum PatchScope {
         let packageModules = Packages.modules(ws: ws)
         var input = Input()
         input.appModule = (try? ws.settings().moduleName) ?? ws.config.appTarget
+        input.root = ws.root
         input.fixturesPath = "\(ws.root)/\(ws.config.fixturesFile)"
         input.fixturesText = (try? String(contentsOfFile: input.fixturesPath, encoding: .utf8)) ?? ""
         let directDeps = Dictionary(packageModules.map { ($0.name, Set($0.dependencies)) }, uniquingKeysWith: { $0.union($1) })

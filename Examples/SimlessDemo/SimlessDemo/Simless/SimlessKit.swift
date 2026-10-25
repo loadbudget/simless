@@ -139,7 +139,7 @@ enum SimlessHost {
         let horizontalSizeClass: String
         let verticalSizeClass: String
         let idiom: String          // what the view's trait collection reports
-        let deviceIdiom: String    // UIDevice.current.userInterfaceIdiom (can't be overridden)
+        let deviceIdiom: String    // UIDevice.current.userInterfaceIdiom (SimlessRuntime makes it follow the phone idiom)
         let safeArea: [Double]     // top, left, bottom, right
         let onMac: Bool
         var textSize: String?

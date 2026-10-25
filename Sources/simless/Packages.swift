@@ -25,14 +25,14 @@ enum Packages {
         return try Shell.check(["swift", "package", "--scratch-path", scratch, "dump-package"], cwd: dir, stdoutOnly: true)
     }
 
-    /// Modules of every local package in the config, cached per Package.swift mtime.
+    /// Modules of every local package in the config, cached per content of its manifests.
     static func modules(ws: Workspace) -> [PackageModule] {
         var result: [PackageModule] = []
         for rel in ws.packages {
             let dir = "\(ws.root)/\(rel)"
             let manifest = "\(dir)/Package.swift"
             guard exists(manifest) else { continue }
-            let cache = "\(ws.work)/package-\(shortHash(dir))-\(Int(mtime(manifest))).json"
+            let cache = "\(ws.work)/package-\(shortHash(dir))-\(manifestDigest(dir)).json"
             if let d = FileManager.default.contents(atPath: cache),
                let cached = try? JSONDecoder().decode([PackageModule].self, from: d) {
                 result += cached
@@ -95,6 +95,122 @@ enum Packages {
     }
 }
 
+/// What a UI test bundle needs from a local package's manifest: the products
+/// it declares, the oldest macOS it builds for, and the packages it uses.
+struct PackageManifest: Codable, Equatable {
+    let name: String
+    let products: [String]
+    let macOS: String?                  // the version of its `platforms` entry for macOS, if it has one
+    let localDependencies: [String]     // absolute directories of its `.package(path:)` dependencies
+    let remoteDependencies: [String]    // the identities of its other dependencies (source control, registry)
+}
+
+/// A local package's products, built for the Mac.
+struct MacProducts: Equatable {
+    let bin: String                     // the modules and `lib<product>.a` of each product
+    let products: [String]
+    let moduleMaps: [String]            // the module maps of the C targets they use
+}
+
+extension Packages {
+    /// A digest of every manifest of the package in `dir` (`Package.swift` and
+    /// each `Package@swift-<version>.swift`): caches of what they declare key on it.
+    static func manifestDigest(_ dir: String) -> String {
+        let files = ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [])
+            .filter { $0.hasPrefix("Package") && $0.hasSuffix(".swift") }.sorted()
+        return shortHash(files.map { "\($0) \(Workspace.digest("\(dir)/\($0)") ?? "")" }.joined(separator: "\n"))
+    }
+
+    /// The manifest of the package in `dir`, cached per content of its manifests.
+    static func manifest(dir: String, ws: Workspace) throws -> PackageManifest {
+        guard exists("\(dir)/Package.swift") else { throw SimlessError("\(dir) has no Package.swift") }
+        let cache = "\(ws.work)/package-manifest-\(shortHash(dir))-\(manifestDigest(dir)).json"
+        if let d = FileManager.default.contents(atPath: cache), let cached = try? JSONDecoder().decode(PackageManifest.self, from: d) {
+            return cached
+        }
+        let m = try manifest(json: dumpPackage(dir))
+        try? mkdirp(ws.work)
+        try? JSONEncoder().encode(m).write(to: URL(fileURLWithPath: cache))
+        return m
+    }
+
+    /// The manifest from `swift package dump-package` output.
+    static func manifest(json: String) throws -> PackageManifest {
+        guard let d = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any],
+              let name = d["name"] as? String else {
+            throw SimlessError("dump-package gave no package description: \(json.prefix(300))")
+        }
+        let products = ((d["products"] as? [[String: Any]]) ?? []).compactMap { $0["name"] as? String }
+        let macOS = ((d["platforms"] as? [[String: Any]]) ?? []).first { $0["platformName"] as? String == "macos" }?["version"] as? String
+        // dependencies: [{"fileSystem": [{"identity": ..., "path": ...}]}, {"sourceControl": [{"identity": ...}]}, {"registry": [...]}]
+        var local: [String] = [], remote: [String] = []
+        for dep in (d["dependencies"] as? [[String: Any]]) ?? [] {
+            for (kind, value) in dep {
+                let fields = (value as? [Any])?.first as? [String: Any] ?? [:]
+                if kind == "fileSystem", let path = fields["path"] as? String { local.append(path) }
+                else { remote.append(fields["identity"] as? String ?? kind) }
+            }
+        }
+        return PackageManifest(name: name, products: products, macOS: macOS, localDependencies: local, remoteDependencies: remote.sorted())
+    }
+
+    /// What `swift build` takes for a package whose own dependencies, or those
+    /// of the local packages it uses, include `remote` ones: the versions of its
+    /// `Package.resolved` and no others, so the build writes nothing in the
+    /// package. With remote dependencies and no `Package.resolved`, it stops.
+    static func resolutionArguments(dir: String, remote: [String], hasResolvedFile: Bool) throws -> [String] {
+        guard !remote.isEmpty else { return [] }
+        guard hasResolvedFile else {
+            throw SimlessError("the package in \(dir) uses remote packages (\(remote.joined(separator: ", "))) and has no Package.resolved, "
+                               + "so simless can't build it without choosing their versions; resolve them (`swift package resolve` in \(dir)) and run again")
+        }
+        return ["--only-use-versions-from-resolved-file"]
+    }
+
+    /// Builds products of the local package in `dir` for the Mac (arm64), the
+    /// slice of a UI test bundle, with every target they depend on: in the
+    /// returned folder, their modules and a `lib<product>.a` for each, which
+    /// holds the product's targets and the targets they depend on, and the
+    /// module maps of the C targets among them, which the folder doesn't hold.
+    ///
+    /// The Swift Build engine is named, since only it writes those archives:
+    /// SwiftPM's older native engine writes object files per target.
+    static func buildForMac(dir: String, products: [String], remote: [String], scratch: String, logs: String) throws -> MacProducts {
+        let base = ["swift", "build", "--package-path", dir, "--scratch-path", scratch, "--build-system", "swiftbuild",
+                    "--triple", "arm64-apple-macosx", "--configuration", "debug"]
+            + (try resolutionArguments(dir: dir, remote: remote, hasResolvedFile: exists("\(dir)/Package.resolved")))
+        for product in products {
+            let log = "\(logs)/package-\(product).log"
+            let r = try Shell.run(base + ["--product", product], cwd: dir, logPath: log)
+            guard r.code == 0 else {
+                let errors = Patch.compilerErrors(r.out)
+                throw SimlessError("building the package product \(product) for the Mac failed (log: \(log)):\n"
+                                   + (errors.isEmpty ? r.out.split(separator: "\n").suffix(15).joined(separator: "\n") : errors))
+            }
+        }
+        let bin = try Shell.check(base + ["--show-bin-path"], cwd: dir, what: "swift build --show-bin-path", stdoutOnly: true)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        for product in products where !exists("\(bin)/lib\(product).a") {
+            throw SimlessError("swift build made no lib\(product).a in \(bin), so the package product \(product) can't be linked")
+        }
+        // The engine writes a module map for each target into a folder next to
+        // the products' (`out/Products/Debug` and `out/Intermediates.noindex`).
+        let maps = URL(fileURLWithPath: bin).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Intermediates.noindex/GeneratedModuleMaps").path
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: maps)) ?? []
+        return MacProducts(bin: bin, products: products, moduleMaps: cModuleMaps(names, in: maps, swiftModules: (try? FileManager.default.contentsOfDirectory(atPath: bin)) ?? []))
+    }
+
+    /// The module maps among `names` (in folder `maps`) of C targets: a Swift
+    /// target has a `<name>.swiftmodule` among `swiftModules`, and its module
+    /// map (for its generated header) isn't one the importer needs.
+    static func cModuleMaps(_ names: [String], in maps: String, swiftModules: [String]) -> [String] {
+        let swift = Set(swiftModules.filter { $0.hasSuffix(".swiftmodule") }.map { String($0.dropLast(".swiftmodule".count)) })
+        return names.filter { $0.hasSuffix(".modulemap") && !swift.contains(String($0.dropLast(".modulemap".count))) }
+            .sorted().map { "\(maps)/\($0)" }
+    }
+}
+
 /// A local package's test targets. The Mac can't run them on their own: Xcode
 /// drops hostless test bundles for "Designed for iPad", and `swift test` builds
 /// for macOS, where iOS-only imports fail. simless builds them for iOS devices
@@ -111,7 +227,7 @@ extension Packages {
             let dir = "\(ws.root)/\(rel)"
             let manifest = "\(dir)/Package.swift"
             guard exists(manifest) else { return nil }
-            let cache = "\(ws.work)/package-tests-\(shortHash(dir))-\(Int(mtime(manifest))).json"
+            let cache = "\(ws.work)/package-tests-\(shortHash(dir))-\(manifestDigest(dir)).json"
             if let d = FileManager.default.contents(atPath: cache), let cached = try? JSONDecoder().decode(PackageTests.self, from: d) {
                 return cached
             }

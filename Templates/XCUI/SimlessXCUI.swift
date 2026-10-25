@@ -219,6 +219,8 @@ final class SimlessUIHost: @unchecked Sendable {
 
     private(set) var snapshot: [Node] = []
     private(set) var generation = 0
+    /// The app answered the last fetch of the tree.
+    private(set) var treeAnswered = false
     private var snapshotAt = Date.distantPast
     var dirty = true
 
@@ -228,8 +230,10 @@ final class SimlessUIHost: @unchecked Sendable {
             if let r = call(["cmd": "ui.snapshot"]), let nodes = r["nodes"] as? [[String: Any]] {
                 generation = r["generation"] as? Int ?? 0
                 snapshot = nodes.enumerated().map { Node($0.offset, $0.element) }
+                treeAnswered = true
             } else {
                 snapshot = []
+                treeAnswered = false
             }
             snapshotAt = Date()
             dirty = false
@@ -361,10 +365,35 @@ struct XCUIKeyboardKey: RawRepresentable, Sendable {
 
 // MARK: - Screenshots
 
+/// A captured screenshot. Apple declares `image` as a `UIImage` on iOS; this
+/// bundle builds for macOS, where UIKit is absent, so `image` is the `NSImage`
+/// that Apple declares for macOS.
+@MainActor
 final class XCUIScreenshot: NSObject, @unchecked Sendable {
-    let pngRepresentation: Data
-    init(png: Data) { pngRepresentation = png }
+    nonisolated let pngRepresentation: Data
+    nonisolated init(png: Data) { pngRepresentation = png }
     var image: NSImage { NSImage(data: pngRepresentation) ?? NSImage() }
+
+    /// Asks the app for a picture of its window, or of `rect` in it.
+    nonisolated static func capture(rect: CGRect? = nil) -> XCUIScreenshot {
+        var request: [String: Any] = ["cmd": "ui.screenshot"]
+        if let rect { request["rect"] = [rect.minX, rect.minY, rect.width, rect.height] }
+        let r = SimlessUIHost.shared.call(request)
+        return XCUIScreenshot(png: (r?["png"] as? String).flatMap { Data(base64Encoded: $0) } ?? Data())
+    }
+}
+
+/// The screen of the device. The app's window is the whole screen of the
+/// stand-in device, so `main` is the only screen, and its screenshot is the
+/// same picture as `XCUIApplication().screenshot()`.
+@MainActor
+final class XCUIScreen: NSObject, @unchecked Sendable {
+    private override init() {}
+
+    static let main = XCUIScreen()
+    static var screens: [XCUIScreen] { [main] }
+
+    func screenshot() -> XCUIScreenshot { XCUIScreenshot.capture() }
 }
 
 extension XCTAttachment {
@@ -404,9 +433,12 @@ class XCUIElement: NSObject, @unchecked Sendable {
     }
 
     /// The node this element currently resolves to, if any.
-    func resolve() -> Node? {
+    func resolve() -> Node? { resolve(in: host.tree()) }
+
+    /// The node this element resolves to in this tree, if any.
+    func resolve(in tree: [Node]) -> Node? {
         guard let query else { return nil }
-        let matches = query.matches()
+        let matches = query.evaluate(in: tree)
         guard let position else { return matches.first }
         return position < matches.count ? matches[position] : nil
     }
@@ -468,6 +500,20 @@ class XCUIElement: NSObject, @unchecked Sendable {
             host.dirty = true
         } while Date() < deadline
         return resolve() == nil
+    }
+
+    /// Waits until the attribute at `keyPath` equals `expectedValue`, reading
+    /// it again from a fresh tree every 50 ms, as `waitForExistence` does.
+    /// False when the timeout ends first.
+    @MainActor @preconcurrency
+    func wait<V: Equatable>(for keyPath: KeyPath<XCUIElement, V>, toEqual expectedValue: V, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout * host.timeScale)
+        repeat {
+            if self[keyPath: keyPath] == expectedValue { return true }
+            Thread.sleep(forTimeInterval: 0.05)
+            host.dirty = true
+        } while Date() < deadline
+        return self[keyPath: keyPath] == expectedValue
     }
 
     // MARK: Actions
@@ -572,9 +618,7 @@ class XCUIElement: NSObject, @unchecked Sendable {
     }
 
     func screenshot() -> XCUIScreenshot {
-        let n = resolve()
-        let r = host.call(["cmd": "ui.screenshot", "rect": n.map { [$0.frame.minX, $0.frame.minY, $0.frame.width, $0.frame.height] } as Any])
-        return XCUIScreenshot(png: (r?["png"] as? String).flatMap { Data(base64Encoded: $0) } ?? Data())
+        XCUIScreenshot.capture(rect: resolve()?.frame)
     }
 
     // MARK: Queries
@@ -867,6 +911,125 @@ final class Snapshot: NSObject {
     @objc var frame: CGRect { node.frame }
 }
 
+// MARK: - Element snapshots
+
+typealias XCUIElementAttributeName = XCUIElement.AttributeName
+
+extension XCUIElement {
+    /// The keys of a snapshot's `dictionaryRepresentation`, with XCTest's raw values.
+    struct AttributeName: Hashable, RawRepresentable, Sendable {
+        let rawValue: String
+        init(rawValue: String) { self.rawValue = rawValue }
+        static let children = AttributeName(rawValue: "children")
+        static let elementType = AttributeName(rawValue: "elementType")
+        static let identifier = AttributeName(rawValue: "identifier")
+        static let value = AttributeName(rawValue: "value")
+        static let placeholderValue = AttributeName(rawValue: "placeholderValue")
+        static let title = AttributeName(rawValue: "title")
+        static let label = AttributeName(rawValue: "label")
+        static let frame = AttributeName(rawValue: "frame")
+        static let enabled = AttributeName(rawValue: "enabled")
+        static let selected = AttributeName(rawValue: "selected")
+        static let hasFocus = AttributeName(rawValue: "hasFocus")
+        static let horizontalSizeClass = AttributeName(rawValue: "horizontalSizeClass")
+        static let verticalSizeClass = AttributeName(rawValue: "verticalSizeClass")
+    }
+}
+
+@MainActor protocol XCUIElementAttributes {
+    var identifier: String { get }
+    var frame: CGRect { get }
+    var value: Any? { get }
+    var title: String { get }
+    var label: String { get }
+    var elementType: XCUIElement.ElementType { get }
+    var isEnabled: Bool { get }
+    var horizontalSizeClass: XCUIElement.SizeClass { get }
+    var verticalSizeClass: XCUIElement.SizeClass { get }
+    var placeholderValue: String? { get }
+    var isSelected: Bool { get }
+    var hasFocus: Bool { get }
+}
+
+@MainActor protocol XCUIElementSnapshot: XCUIElementAttributes {
+    var children: [any XCUIElementSnapshot] { get }
+    var dictionaryRepresentation: [XCUIElement.AttributeName: Any] { get }
+}
+
+@MainActor protocol XCUIElementSnapshotProviding: NSObjectProtocol {
+    func snapshot() throws -> any XCUIElementSnapshot
+}
+
+extension XCUIElement: XCUIElementAttributes {}
+
+extension XCUIElement: XCUIElementSnapshotProviding {
+    /// The element and everything below it, from one read of the tree: the
+    /// values stay as they were at that read.
+    @MainActor
+    func snapshot() throws -> any XCUIElementSnapshot {
+        let tree = host.tree(fresh: true)
+        guard host.treeAnswered else { throw SnapshotError(description: "No snapshot: the app isn't running, or it didn't answer") }
+        guard let node = resolve(in: tree) else {
+            throw SnapshotError(description: "No snapshot: no element matches \(query.map { "\($0)" } ?? "the query")\(position.map { " at index \($0)" } ?? "")")
+        }
+        let byParent = Dictionary(grouping: tree, by: \.parent)
+        let sizeClass = horizontalSizeClass
+        func build(_ n: Node) -> ElementSnapshot {
+            ElementSnapshot(node: n, children: (byParent[n.index] ?? []).map(build),
+                            horizontalSizeClass: sizeClass, verticalSizeClass: verticalSizeClass)
+        }
+        return build(node)
+    }
+
+    struct SnapshotError: Error, CustomStringConvertible {
+        let description: String
+    }
+}
+
+/// One node of a snapshot and the nodes below it.
+@MainActor final class ElementSnapshot: XCUIElementSnapshot {
+    let node: Node
+    let children: [any XCUIElementSnapshot]
+    let horizontalSizeClass: XCUIElement.SizeClass
+    let verticalSizeClass: XCUIElement.SizeClass
+
+    init(node: Node, children: [ElementSnapshot], horizontalSizeClass: XCUIElement.SizeClass, verticalSizeClass: XCUIElement.SizeClass) {
+        self.node = node
+        self.children = children
+        self.horizontalSizeClass = horizontalSizeClass
+        self.verticalSizeClass = verticalSizeClass
+    }
+
+    var identifier: String { node.identifier }
+    var frame: CGRect { node.frame }
+    var value: Any? { node.value }
+    var title: String { node.title }
+    var label: String { node.label }
+    var elementType: XCUIElement.ElementType { node.type }
+    var isEnabled: Bool { node.enabled }
+    var placeholderValue: String? { node.placeholder }
+    var isSelected: Bool { node.selected }
+    var hasFocus: Bool { node.focused }
+
+    /// XCTest's form: the frame as `CGRect.dictionaryRepresentation`, numbers
+    /// as NSNumbers, and no key for a value the element doesn't have.
+    var dictionaryRepresentation: [XCUIElement.AttributeName: Any] {
+        var d: [XCUIElement.AttributeName: Any] = [
+            .identifier: identifier, .title: title, .label: label,
+            .frame: frame.dictionaryRepresentation,
+            .elementType: NSNumber(value: elementType.rawValue),
+            .enabled: NSNumber(value: isEnabled), .selected: NSNumber(value: isSelected),
+            .hasFocus: NSNumber(value: hasFocus),
+            .horizontalSizeClass: NSNumber(value: horizontalSizeClass.rawValue),
+            .verticalSizeClass: NSNumber(value: verticalSizeClass.rawValue),
+            .children: children.map { $0.dictionaryRepresentation },
+        ]
+        if let value { d[.value] = value }
+        if let placeholderValue { d[.placeholderValue] = placeholderValue }
+        return d
+    }
+}
+
 // MARK: - Application
 
 final class XCUIApplication: XCUIElement {
@@ -889,6 +1052,8 @@ final class XCUIApplication: XCUIElement {
     }
 
     private var isOther: Bool { bundleIdentifier != nil }
+
+    override func resolve(in tree: [Node]) -> Node? { resolve() }
 
     override func resolve() -> Node? {
         // The application itself: a node standing for the whole window.
@@ -954,10 +1119,7 @@ final class XCUIApplication: XCUIElement {
             + tree.map { XCUIElementQuery.describe($0, in: tree) }.joined(separator: "\n")
     }
 
-    override func screenshot() -> XCUIScreenshot {
-        let r = host.call(["cmd": "ui.screenshot"])
-        return XCUIScreenshot(png: (r?["png"] as? String).flatMap { Data(base64Encoded: $0) } ?? Data())
-    }
+    override func screenshot() -> XCUIScreenshot { XCUIScreenshot.capture() }
 
     // Springboard: the status bar sits in the top safe area.
     override func descendants(matching type: ElementType) -> XCUIElementQuery {
@@ -965,6 +1127,43 @@ final class XCUIApplication: XCUIElement {
             return StatusBarQuery(parent: self, step: .descendants(.statusBar))
         }
         return super.descendants(matching: type)
+    }
+
+    // MARK: Protected resources
+
+    /// Makes the app ask again for `resource` the next time it uses it.
+    ///
+    /// By default SimlessRuntime answers every permission request itself, on
+    /// each launch, and stores no answer between launches, so the reset
+    /// changes nothing.
+    ///
+    /// With `SIMLESS_PERMISSIONS=ask` the requests reach macOS, which keeps
+    /// the answers in its TCC store by the slot's bundle id. The reset runs
+    /// `tccutil reset <service> <slot bundle id>` for the resource's TCC
+    /// service. Location, health, a keyboard's network access and the local
+    /// network have no TCC service that `tccutil` resets on macOS: it refuses
+    /// `Location`, `Health`, `HealthKit`, `KeyboardNetwork` and `LocalNetwork`.
+    /// So for those the reset does nothing, and the test runs on with the
+    /// answer the earlier launches left.
+    @available(iOS 13.4, *)
+    @MainActor @preconcurrency
+    func resetAuthorizationStatus(for resource: XCUIProtectedResource) {
+        guard host.env["SIMLESS_PERMISSIONS"] == "ask", let service = resource.tccService else { return }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+        p.arguments = ["reset", service, host.slotID]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = out
+        do { try p.run() } catch {
+            XCTFail("resetAuthorizationStatus(for: \(resource)): could not run tccutil: \(error)")
+            return
+        }
+        let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        p.waitUntilExit()
+        if p.terminationStatus != 0 {
+            XCTFail("resetAuthorizationStatus(for: \(resource)): tccutil reset \(service) \(host.slotID) failed: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
     }
 
     // MARK: Accessibility audit
@@ -1011,6 +1210,48 @@ final class StatusBarQuery: XCUIElementQuery {
         let c = SimlessUIHost.shared.canvas
         let frame: [Double] = [0, 0, c.first ?? 402, c.count > 2 ? c[2] : 62]
         return [Node(-2, ["type": Int(XCUIElement.ElementType.statusBar.rawValue), "frame": frame, "hittable": true])]
+    }
+}
+
+@available(iOS 13.4, *)
+enum XCUIProtectedResource: Int, @unchecked Sendable {
+    case contacts = 1
+    case calendar = 2
+    case reminders = 3
+    case photos = 4
+    case microphone = 5
+    case camera = 6
+    case mediaLibrary = 7
+    case homeKit = 8
+    @available(iOS 15.0, *)
+    case focus = 9
+    @available(iOS 15.4, *)
+    case localNetwork = -1073741829
+    case bluetooth = -1073741824
+    case keyboardNetwork = -1073741825
+    case location = -1073741826
+    @available(iOS 14.0, *)
+    case health = -1073741827
+    @available(iOS 15.0, *)
+    case userTracking = -1073741828
+
+    /// The macOS TCC service that holds this resource's answer, as
+    /// `tccutil` names it; nil where macOS has none for an app.
+    var tccService: String? {
+        switch self {
+        case .contacts: return "AddressBook"
+        case .calendar: return "Calendar"
+        case .reminders: return "Reminders"
+        case .photos: return "Photos"
+        case .microphone: return "Microphone"
+        case .camera: return "Camera"
+        case .mediaLibrary: return "MediaLibrary"
+        case .homeKit: return "Willow"
+        case .focus: return "FocusStatus"
+        case .bluetooth: return "BluetoothAlways"
+        case .userTracking: return "UserTracking"
+        case .localNetwork, .keyboardNetwork, .location, .health: return nil
+        }
     }
 }
 

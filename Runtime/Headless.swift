@@ -108,7 +108,8 @@ enum DeviceModel {
         // idiom is left alone: SwiftUI picks control styles from it.
         // Only in UI test hosts: under the phone idiom SwiftUI's Stepper and form
         // controls can overflow the stack on the Mac, which a render host or a
-        // unit test host shouldn't risk for a screen that doesn't need it.
+        // unit test host shouldn't risk for a screen that doesn't need it. In
+        // those hosts the device's idiom follows a phone-idiom render (Idiom.swift).
         if model == "iPhone", ProcessInfo.processInfo.environment["SIMLESS_UI"] == "1",
            let m = class_getInstanceMethod(NSClassFromString("UIDevice"), NSSelectorFromString("userInterfaceIdiom")) {
             let block: @convention(block) (AnyObject) -> Int = { _ in 0 }

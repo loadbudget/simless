@@ -39,6 +39,7 @@ simless: fast, headless, simulator-free SwiftUI checks for AI agents.
   simless calibrate [fixture]     compare renders with an iOS Simulator (boots one, once per app)
         [--dark] [--png <dir>]: also dark mode; save both renders of every screen + a side-by-side report.md
         [--runtime <iOS version, e.g. 26.5>] [--sim-device <name, e.g. "iPhone 16e">]
+        [--settle <ms>]: time each side gives a screen for its async work before it's read
   simless status                   hosts, test runs going on and their share of the Mac, disk use
   simless down [--all]             stop this worktree's hosts, render, test and UI (or every worktree's); they start again on next use
   simless clean [--all]            remove this worktree's host, slot and build cache (--all: everything simless created)
@@ -283,6 +284,7 @@ func cmdUp(_ args: Args) throws {
     // Before anything is written: a refused `up` keeps the snapshot of the
     // build the host runs, so the next `reload` still sees every edit.
     try ws.checkFixtureSources()
+    try Previews.checkNames(ws)
     Cleanup.capCompileCache()
     let t = now()
     let buildStart = Date().timeIntervalSinceReferenceDate
@@ -846,7 +848,8 @@ do {
                                          dark: args.flags.contains("--dark"),
                                          runtime: args.values["--runtime"] ?? ws.config.calibrate?.runtime,
                                          device: args.values["--sim-device"] ?? ws.config.calibrate?.device,
-                                         idiom: ws.phoneIdiom(args.values["--idiom"])))
+                                         idiom: ws.phoneIdiom(args.values["--idiom"]),
+                                         settle: args.values["--settle"].flatMap(Double.init) ?? ws.config.settle))
     case "skill": try cmdSkill(args)
     case "help", "-h", "--help": print(usage)
     case "version", "--version":

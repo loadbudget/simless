@@ -30,32 +30,64 @@ enum UITestEngine {
     // MARK: - Targets
 
     /// UI test targets in the build (the .xctestrun's UI test bundles), with
-    /// their sources (synchronized folders, or a folder named like the target).
+    /// their sources: the target's synchronized folders, the files of its
+    /// Sources build phase, and the folder tests.uiSources names; failing all
+    /// three, a folder named like the target.
     static func targets(_ ws: Workspace, includingUnbuilt: Bool = false) -> [UITarget] {
-        var names = Set<String>()
-        if let file = ws.appXCTestRun,
-           let data = FileManager.default.contents(atPath: file),
-           let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] {
-            var entries: [[String: Any]] = []
-            if let configs = plist["TestConfigurations"] as? [[String: Any]] {
-                entries = configs.flatMap { $0["TestTargets"] as? [[String: Any]] ?? [] }
-            } else {
-                entries = plist.filter { !$0.key.hasPrefix("__") }.compactMap { $0.value as? [String: Any] }
-            }
-            names = Set(entries.filter { $0["IsUITestBundle"] as? Bool == true }.compactMap { $0["BlueprintName"] as? String })
-        }
+        let names = builtTargetNames(ws)
         let pbx = (try? String(contentsOfFile: "\(ws.root)/\(ws.config.project)/project.pbxproj", encoding: .utf8)) ?? ""
         let unbuilt = includingUnbuilt ? uiTestTargets(pbx: pbx).subtracting(names) : []
         return (names.union(unbuilt)).sorted().compactMap { name in
-            let dirs = PBX.synchronizedFolders(target: name, pbx: pbx).map { "\(ws.projectDir)/\($0)" }
-                + (ws.config.tests?.uiSources?[name].map { ["\(ws.root)/\($0)"] } ?? [])
-            let folders = dirs.isEmpty ? ["\(ws.projectDir)/\(name)"].filter { exists($0) } : dirs
-            let sources = folders.flatMap { dir -> [String] in
-                guard let e = FileManager.default.enumerator(atPath: dir) else { return [] }
-                return e.compactMap { $0 as? String }.filter { $0.hasSuffix(".swift") }.map { "\(dir)/\($0)" }
-            }.sorted()
+            let sources = sourceFiles(target: name, pbx: pbx, projectDir: ws.projectDir, root: ws.root,
+                                      uiSources: ws.config.tests?.uiSources?[name])
             return sources.isEmpty ? nil : UITarget(name: name, sources: sources, built: !unbuilt.contains(name))
         }
+    }
+
+    /// The Swift files of one UI test target, as absolute, standardized paths.
+    /// The folder named like the target counts only when the target has no
+    /// synchronized folder, lists no Swift file and has no tests.uiSources.
+    static func sourceFiles(target: String, pbx: String, projectDir: String, root: String, uiSources: String?) -> [String] {
+        let dirs = PBX.synchronizedFolders(target: target, pbx: pbx).map { absolute($0, in: projectDir) } + (uiSources.map { [absolute($0, in: root)] } ?? [])
+        let listed = PBX.sourceFiles(target: target, pbx: pbx).filter { $0.hasSuffix(".swift") }.map { absolute($0, in: projectDir) }
+        let folders = dirs.isEmpty && listed.isEmpty ? ["\(projectDir)/\(target)"].filter { exists($0) } : dirs
+        let found = folders.flatMap { dir -> [String] in
+            guard let e = FileManager.default.enumerator(atPath: dir) else { return [] }
+            return e.compactMap { $0 as? String }.filter { $0.hasSuffix(".swift") }.map { "\(dir)/\($0)" }
+        }
+        return Set((found + listed).map(standardized)).sorted()
+    }
+
+    private static func absolute(_ path: String, in dir: String) -> String { path.hasPrefix("/") ? path : "\(dir)/\(path)" }
+    private static func standardized(_ path: String) -> String { URL(fileURLWithPath: path).standardizedFileURL.path }
+
+    /// The UI test sources that no other target compiles, by its Sources build
+    /// phase or a synchronized folder. Only those can leave the record of the
+    /// app's build: a file the app compiles too is an input of that build.
+    static func uiOnlySources(_ ws: Workspace) -> Set<String> {
+        let pbx = (try? String(contentsOfFile: "\(ws.root)/\(ws.config.project)/project.pbxproj", encoding: .utf8)) ?? ""
+        return uiOnly(targets(ws, includingUnbuilt: true).flatMap(\.sources), pbx: pbx, projectDir: ws.projectDir)
+    }
+
+    static func uiOnly(_ sources: [String], pbx: String, projectDir: String) -> Set<String> {
+        let others = Set(PBX.targetNames(pbx: pbx)).subtracting(uiTestTargets(pbx: pbx))
+        let files = Set(others.flatMap { PBX.sourceFiles(target: $0, pbx: pbx) }.map { standardized(absolute($0, in: projectDir)) })
+        let folders = others.flatMap { PBX.synchronizedFolders(target: $0, pbx: pbx) }.map { standardized(absolute($0, in: projectDir)) + "/" }
+        return Set(sources.map(standardized).filter { file in !files.contains(file) && !folders.contains { file.hasPrefix($0) } })
+    }
+
+    /// The UI test bundles in the scheme's .xctestrun.
+    static func builtTargetNames(_ ws: Workspace) -> Set<String> {
+        guard let file = ws.appXCTestRun,
+              let data = FileManager.default.contents(atPath: file),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return [] }
+        let entries: [[String: Any]]
+        if let configs = plist["TestConfigurations"] as? [[String: Any]] {
+            entries = configs.flatMap { $0["TestTargets"] as? [[String: Any]] ?? [] }
+        } else {
+            entries = plist.filter { !$0.key.hasPrefix("__") }.compactMap { $0.value as? [String: Any] }
+        }
+        return Set(entries.filter { $0["IsUITestBundle"] as? Bool == true }.compactMap { $0["BlueprintName"] as? String })
     }
 
     /// Every UI test target in the project, built or not.
@@ -70,37 +102,263 @@ enum UITestEngine {
         return out
     }
 
-    /// Test methods per class, from the sources (XCTestCase subclasses).
-    static func tests(in target: UITarget) -> [TestID] {
-        var out: [TestID] = []
+    /// What the sources of a UI test target declare.
+    struct Discovery {
+        /// Test methods per class.
+        var tests: [TestID] = []
+        /// A class with tests in its chain whose superclass no file of the
+        /// target declares (in a package, say), so its chain can't reach XCTestCase.
+        var unknownSuperclasses: [(cls: String, superclass: String)] = []
+    }
+
+    static func tests(in target: UITarget) -> [TestID] { discover(target).tests }
+
+    /// Test methods per class, from the sources. A class runs tests when its
+    /// chain of superclasses, declared in any file of the target, reaches
+    /// XCTestCase. Its tests are the `func test...()` methods with no result,
+    /// at the top of its body or of an `extension <Class>` block in any file,
+    /// and those of its superclasses, as XCTest runs inherited tests. A class
+    /// with no such method yields none. Methods in a private extension, and
+    /// private methods, don't run in XCTest and aren't listed.
+    static func discover(_ target: UITarget) -> Discovery {
+        let decl = #/^(?:@\w+(?:\([^)]*\))?\s+)*((?:(?:public|open|internal|private|fileprivate|final)\s+)*)/#
+        let method = #/^\s+(?:(?:@\w+(?:\([^)]*\))?|public|open|internal|final|override|nonisolated|dynamic)\s+)*func\s+(test\w*)\s*\(\s*\)([^{]*)/#
+        var superclass: [String: String] = [:]
+        var declared: [String] = []                // classes, in source order
+        var methods: [(type: String, name: String)] = []
         for file in target.sources {
             guard let text = try? String(contentsOfFile: file, encoding: .utf8) else { continue }
-            var cls: String?
+            var type: String?
+            var depth = 0
+            var lexer = CodeLexer()
             // Only what an iPhone simulator run would compile (see PlatformConditions).
-            for line in PlatformConditions.activeLines(text) {
-                if let m = line.firstMatch(of: #/^(?:final\s+)?(?:@\w+\s+)*(?:final\s+)?class\s+(\w+)\s*:\s*XCTestCase\b/#) { cls = String(m.1) }
-                else if line.firstMatch(of: #/^(?:final\s+)?(?:public\s+)?(?:struct|class|enum|extension)\s/#) != nil { cls = nil }
-                if let c = cls, let m = line.firstMatch(of: #/^\s+(?:@\w+\s+)*func\s+(test\w*)\s*\(\s*\)/#) {
-                    out.append(TestID(target: target.name, cls: c, method: String(m.1)))
+            for raw in PlatformConditions.activeLines(text) {
+                let line = lexer.code(raw)
+                let start = depth
+                depth = max(0, depth + line.filter { $0 == "{" }.count - line.filter { $0 == "}" }.count)
+                if start == 0 {
+                    // A declaration at the top level, after its attributes and modifiers.
+                    let trimmed = line.drop { $0 == " " || $0 == "\t" }
+                    let m = trimmed.prefixMatch(of: decl)
+                    let rest = m.map { trimmed[$0.range.upperBound...] } ?? trimmed
+                    let isPrivate = m.map { $0.output.1.contains("private") } ?? false
+                    if let c = rest.firstMatch(of: #/^class\s+(\w+)\s*(?:<[^>{]*>)?\s*(?::\s*(?:\w+\.)?(\w+))?/#) {
+                        type = String(c.1)
+                        declared.append(String(c.1))
+                        if let s = c.2 { superclass[String(c.1)] = String(s) }
+                    } else if let e = rest.firstMatch(of: #/^extension\s+(?:\w+\.)?(\w+)\b/#) {
+                        type = isPrivate ? nil : String(e.1)
+                    } else if rest.first.map({ $0.isLetter || $0 == "@" }) == true {
+                        // Another declaration; a brace on its own line keeps the class.
+                        type = nil
+                    }
+                    continue
                 }
+                if start == 1, let t = type, let m = line.prefixMatch(of: method), !m.output.2.contains("->") {
+                    methods.append((t, String(m.1)))
+                }
+            }
+        }
+        let withTests = Set(methods.map(\.type))
+        var out = Discovery()
+        var seen = Set<TestID>()
+        var reported = Set<String>()
+        for c in declared {
+            // c first, then its superclasses, while a file declares them.
+            var chain = [c]
+            var end: String?
+            while chain.count < 64, let s = superclass[chain.last!] {
+                if s == "XCTestCase" { end = s; break }
+                if chain.contains(s) || !declared.contains(s) { break }
+                chain.append(s)
+            }
+            if end == nil, let last = chain.last, let s = superclass[last], s != "XCTestCase", s != "NSObject", !declared.contains(s),
+               !withTests.isDisjoint(with: chain), reported.insert(last).inserted {
+                out.unknownSuperclasses.append((last, s))
+            }
+            guard end != nil else { continue }
+            let members = Set(chain)
+            for m in methods where members.contains(m.type) {
+                let id = TestID(target: target.name, cls: c, method: m.name)
+                if seen.insert(id).inserted { out.tests.append(id) }
             }
         }
         return out
     }
 
+    /// The code of each line, without comments and the text of string
+    /// literals, so braces and declarations in them don't count.
+    struct CodeLexer {
+        private var inComment = false
+        private var inMultiline = false
+
+        mutating func code(_ line: Substring) -> String {
+            var out = ""
+            var i = line.startIndex
+            func at(_ s: String) -> Bool { line[i...].hasPrefix(s) }
+            while i < line.endIndex {
+                if inComment {
+                    if at("*/") { inComment = false; i = line.index(i, offsetBy: 2) } else { i = line.index(after: i) }
+                } else if inMultiline {
+                    if at("\"\"\"") { inMultiline = false; out += "\"\""; i = line.index(i, offsetBy: 3) } else { i = line.index(after: i) }
+                } else if at("//") {
+                    break
+                } else if at("/*") {
+                    inComment = true; i = line.index(i, offsetBy: 2)
+                } else if at("\"\"\"") {
+                    inMultiline = true; i = line.index(i, offsetBy: 3)
+                } else if line[i] == "\"" {
+                    // A one-line literal: its text goes, up to the closing quote.
+                    out += "\"\""
+                    i = line.index(after: i)
+                    while i < line.endIndex && line[i] != "\"" {
+                        i = line.index(i, offsetBy: line[i] == "\\" && line.index(after: i) < line.endIndex ? 2 : 1)
+                    }
+                    if i < line.endIndex { i = line.index(after: i) }
+                } else {
+                    out.append(line[i]); i = line.index(after: i)
+                }
+            }
+            return out
+        }
+    }
+
+    // MARK: - Package products
+
+    /// A package product that a UI test target links, and the local package that declares it.
+    struct LinkedProduct: Equatable {
+        let name: String
+        let packageDir: String
+        let manifest: PackageManifest
+    }
+
+    /// The products in `target`'s `packageProductDependencies`, each with the
+    /// local package that declares it: the package the project file names, or
+    /// when it names none, the one package whose manifest declares the product
+    /// among `localPackages` (absolute directories) and the packages they use
+    /// by `.package(path:)`, at any depth. A product of a remote package, of a
+    /// package reference simless can't read, or that no package or two
+    /// packages declare, stops the build with an error that names it and the target.
+    static func linkedProducts(target: String, pbx: String, projectDir: String, localPackages: [String],
+                               manifest: (String) throws -> PackageManifest) throws -> [LinkedProduct] {
+        try PBX.packageProducts(target: target, pbx: pbx).map { p in
+            func read(_ dir: String) throws -> PackageManifest {
+                do { return try manifest(dir) } catch {
+                    throw SimlessError("\(target) links the package product \(p.name), and simless can't read the package in \(dir): \(error)")
+                }
+            }
+            let candidates: [String]
+            switch p.package {
+            case .remote(let url):
+                throw SimlessError("\(target) links the package product \(p.name) from the remote package \(url); "
+                                   + "simless builds a UI test bundle only with products of local packages")
+            case .unknown(let what):
+                throw SimlessError("\(target) links the package product \(p.name) from a package reference that simless can't read (\(what))")
+            case .local(let path):
+                candidates = [standardized(absolute(path, in: projectDir))]
+            case .unnamed:
+                candidates = try withLocalDependencies(localPackages.map(standardized), manifest: read)
+            }
+            let declaring = try candidates.compactMap { dir -> (String, PackageManifest)? in
+                let m = try read(dir)
+                return m.products.contains(p.name) ? (dir, m) : nil
+            }
+            guard declaring.count == 1, let (dir, m) = declaring.first else {
+                let looked = candidates.isEmpty ? "the project has no local package" : "looked in \(candidates.joined(separator: ", "))"
+                throw SimlessError(declaring.isEmpty
+                    ? "\(target) links the package product \(p.name), which no local package declares (\(looked))"
+                    : "\(target) links the package product \(p.name), which more than one local package declares (\(declaring.map(\.0).joined(separator: ", ")))")
+            }
+            return LinkedProduct(name: p.name, packageDir: dir, manifest: m)
+        }
+    }
+
+    /// `packages` (standardized directories), then the packages they use by
+    /// `.package(path:)`, at any depth, each once.
+    static func withLocalDependencies(_ packages: [String], manifest: (String) throws -> PackageManifest) throws -> [String] {
+        var out: [String] = []
+        var queue = packages
+        while !queue.isEmpty {
+            let dir = queue.removeFirst()
+            guard !out.contains(dir) else { continue }
+            out.append(dir)
+            queue += try manifest(dir).localDependencies.map(standardized)
+        }
+        return out
+    }
+
+    /// The remote dependencies of the package in `dir` and of the local packages it uses, at any depth.
+    static func remoteDependencies(of dir: String, manifest: (String) throws -> PackageManifest) throws -> [String] {
+        try Array(Set(withLocalDependencies([standardized(dir)], manifest: manifest).flatMap { try manifest($0).remoteDependencies })).sorted()
+    }
+
+    /// The macOS a UI test bundle is built for: 14.0, or the newest macOS
+    /// that a package it links builds for, since a module can't be imported
+    /// by code built for an older macOS than its own.
+    static func macOSVersion(packages: [String?]) -> String {
+        func parts(_ v: String) -> [Int] { v.split(separator: ".").map { Int($0) ?? 0 } }
+        return (["14.0"] + packages.compactMap { $0 }).max { parts($0).lexicographicallyPrecedes(parts($1)) }!
+    }
+
+    /// The products of each package, packages in path order and products in the project file's order.
+    static func productsByPackage(_ linked: [LinkedProduct]) -> [(dir: String, products: [String])] {
+        Dictionary(grouping: linked, by: \.packageDir).sorted { $0.key < $1.key }.map { ($0.key, $0.value.map(\.name)) }
+    }
+
+    /// The compiler arguments that give the bundle the modules and archives
+    /// of the products, from the folder each package was built into, and the
+    /// module maps of the C targets they use, which a Swift module that
+    /// imports one needs too.
+    static func packageArguments(_ built: [MacProducts]) -> [String] {
+        built.flatMap { b in
+            ["-I", b.bin] + b.moduleMaps.flatMap { ["-Xcc", "-fmodule-map-file=\($0)"] } + b.products.map { "\(b.bin)/lib\($0).a" }
+        }
+    }
+
+    /// What the bundle's build depends on: each file with its content, each
+    /// linked package with the time of its newest file and its products, the
+    /// macOS it is built for, and this simless.
+    static func bundleKey(files: [String], digest: (String) -> String?, packages: [(dir: String, newest: Double, products: [String])],
+                          macOS: String, simless: Double) -> String {
+        shortHash((files.sorted().map { "\($0) \(digest($0) ?? "")" }
+                   + packages.map { "\($0.dir) \($0.newest) \($0.products.joined(separator: ","))" }
+                   + ["macOS \(macOS)", "\(simless)"]).joined(separator: "\n"))
+    }
+
+    /// The swiftc command that builds the bundle's executable.
+    static func bundleCommand(module: String, macOS: String, sdk: String, swiftVersion: String, platform p: String, output: String,
+                              packages: [MacProducts], sources: [String]) -> [String] {
+        ["xcrun", "swiftc", "-D", PlatformConditions.trueFlag, "-emit-library", "-Onone", "-g", "-module-name", module,
+         "-target", "arm64-apple-macos\(macOS)", "-sdk", sdk, "-swift-version", swiftVersion,
+         "-F", "\(p)/Library/Frameworks", "-I", "\(p)/usr/lib", "-L", "\(p)/usr/lib",
+         "-framework", "XCTest", "-Xlinker", "-bundle",
+         "-Xlinker", "-rpath", "-Xlinker", "\(p)/Library/Frameworks",
+         "-Xlinker", "-rpath", "-Xlinker", "\(p)/usr/lib",
+         "-o", output] + packageArguments(packages) + sources
+    }
+
     // MARK: - Build
 
-    /// The UI test target compiled for macOS with simless's XCUITest API.
+    /// The UI test target compiled for macOS with simless's XCUITest API, and
+    /// linked with the local package products the target links.
     static func build(_ target: UITarget, ws: Workspace) throws -> String {
         let dir = "\(ws.work)/UITests"
         let bundle = "\(dir)/\(target.name).xctest"
         let exe = "\(bundle)/Contents/MacOS/\(target.name)"
         let shim = ((try? FileManager.default.contentsOfDirectory(atPath: "\(Paths.toolRoot)/Templates/XCUI")) ?? [])
             .filter { $0.hasSuffix(".swift") }.map { "\(Paths.toolRoot)/Templates/XCUI/\($0)" }
+        let pbx = (try? String(contentsOfFile: "\(ws.root)/\(ws.config.project)/project.pbxproj", encoding: .utf8)) ?? ""
+        let manifest = { (dir: String) in try Packages.manifest(dir: dir, ws: ws) }
+        let linked = try linkedProducts(target: target.name, pbx: pbx, projectDir: ws.projectDir,
+                                        localPackages: ws.packages.map { "\(ws.root)/\($0)" }, manifest: manifest)
+        let packages = productsByPackage(linked)
+        let macOS = macOSVersion(packages: linked.map(\.manifest.macOS))
         // Built from exactly these files with exactly this content (a deleted
-        // file or one put back to an older version counts too), by this simless.
-        let key = shortHash(((target.sources + shim).sorted().map { "\($0) \(Workspace.digest($0) ?? "")" }
-                             + ["\(mtime(Bundle.main.executablePath ?? ""))"]).joined(separator: "\n"))
+        // file or one put back to an older version counts too), by this simless,
+        // and from the linked packages as of their newest file.
+        let key = bundleKey(files: target.sources + shim, digest: Workspace.digest,
+                            packages: packages.map { ($0.dir, Packages.newestSource($0.dir), $0.products) },
+                            macOS: macOS, simless: mtime(Bundle.main.executablePath ?? ""))
         let keyFile = "\(bundle)/Contents/simless-sources"
         if exists(exe), (try? String(contentsOfFile: keyFile, encoding: .utf8)) == key { return bundle }
         try? FileManager.default.removeItem(atPath: keyFile)
@@ -125,13 +383,18 @@ enum UITestEngine {
                 .write(toFile: copy, atomically: true, encoding: .utf8)
             sources.append(copy)
         }
-        let r = try Shell.run(["xcrun", "swiftc", "-D", PlatformConditions.trueFlag, "-emit-library", "-Onone", "-g", "-module-name", TestEngine.moduleName(target.name),
-                               "-target", "arm64-apple-macos14.0", "-sdk", sdk, "-swift-version", settings.swiftVersion,
-                               "-F", "\(p)/Library/Frameworks", "-I", "\(p)/usr/lib", "-L", "\(p)/usr/lib",
-                               "-framework", "XCTest", "-Xlinker", "-bundle",
-                               "-Xlinker", "-rpath", "-Xlinker", "\(p)/Library/Frameworks",
-                               "-Xlinker", "-rpath", "-Xlinker", "\(p)/usr/lib",
-                               "-o", exe] + sources + shim, cwd: ws.root, logPath: log)
+        var built: [MacProducts] = []
+        for p in packages {
+            Log.step("building \(p.products.joined(separator: ", ")) for the Mac, which \(target.name) links")
+            do {
+                built.append(try Packages.buildForMac(dir: p.dir, products: p.products, remote: remoteDependencies(of: p.dir, manifest: manifest),
+                                                      scratch: "\(dir)/packages/\(shortHash(p.dir))", logs: dir))
+            } catch {
+                throw SimlessError("\(target.name): \(error)")
+            }
+        }
+        let r = try Shell.run(bundleCommand(module: TestEngine.moduleName(target.name), macOS: macOS, sdk: sdk, swiftVersion: settings.swiftVersion,
+                                            platform: p, output: exe, packages: built, sources: sources + shim), cwd: ws.root, logPath: log)
         guard r.code == 0 else {
             throw SimlessError("building \(target.name) for simless failed (log: \(log)):\n" + Patch.compilerErrors(r.out))
         }
@@ -216,7 +479,16 @@ enum UITestEngine {
         let t = now()
         let every = targets(ws, includingUnbuilt: true)
         let all = every.filter(\.built)
-        guard !all.isEmpty else { throw SimlessError("no UI test targets in the build (is the UI test target in the scheme?)") }
+        guard !all.isEmpty else { throw noTargetsError(ws) }
+        let pbx = (try? String(contentsOfFile: "\(ws.root)/\(ws.config.project)/project.pbxproj", encoding: .utf8)) ?? ""
+        for target in all {
+            for f in PBX.unresolvedSwiftFiles(target: target.name, pbx: pbx) {
+                Log.info("note: \(target.name) compiles \(f.name) from \(f.sourceTree), which simless doesn't read; it's left out")
+            }
+            for u in discover(target).unknownSuperclasses {
+                Log.info("note: \(target.name): \(u.cls) inherits from \(u.superclass), which no file of the target declares, so its tests aren't found")
+            }
+        }
         let config = ws.config.tests
         let simulatorOnly = config?.simulatorOnly ?? [:]
         let skips = (config?.skip ?? []) + (args.repeated["--skip"] ?? []) + simulatorOnly.keys.sorted()
@@ -273,6 +545,7 @@ enum UITestEngine {
             let ids = asked.filter { !skipped($0) }
             excluded += asked.filter { skipped($0) && markedTests[$0.user] == nil }.map(\.user)
             if ids.isEmpty { continue }
+            Log.step("\(target.name): \(ids.count) UI test(s) selected from \(target.sources.count) source file(s)")
             bundles[target.name] = try build(target, ws: ws)
             selected += ids
         }
@@ -287,6 +560,10 @@ enum UITestEngine {
                 return true
             }
             if !named.isEmpty { throw SimlessError("\(named[0]) is in a UI test target the scheme doesn't build, so it can't run here") }
+            if filters.isEmpty && !excluded.isEmpty {
+                throw SimlessError("every UI test is skipped: \(excluded.count) by --skip or tests.skip")
+            }
+            if filters.isEmpty { throw SimlessError(noTestsMessage(all)) }
             throw SimlessError("no UI tests match \(filters.joined(separator: " "))")
         }
 
@@ -397,6 +674,39 @@ enum UITestEngine {
         if !ok, let note = SimulatorBranches.note(ws) { print("  \(note)") }
         print("\(ok ? "PASSED" : "FAILED") in \(secs(t)) (screenshots of failures and logs: \(artifacts))")
         return ok
+    }
+
+    /// Why no UI test target can run: none is in the build, or simless found
+    /// no sources for the ones that are.
+    static func noTargetsError(_ ws: Workspace) -> SimlessError {
+        let names = builtTargetNames(ws).sorted()
+        if names.isEmpty { return SimlessError("no UI test targets in the build (is the UI test target in the scheme?)") }
+        let pbx = (try? String(contentsOfFile: "\(ws.root)/\(ws.config.project)/project.pbxproj", encoding: .utf8)) ?? ""
+        return SimlessError("no UI test sources found:\n" + names.map {
+            "  " + missingSourcesReason(target: $0, pbx: pbx, project: ws.config.project, projectDir: ws.projectDir,
+                                         uiSources: ws.config.tests?.uiSources?[$0])
+        }.joined(separator: "\n"))
+    }
+
+    /// Why one UI test target in the build has no source, and what to set.
+    static func missingSourcesReason(target: String, pbx: String, project: String, projectDir: String, uiSources: String?) -> String {
+        let setting = "set tests.uiSources in .simless.json to its folder, relative to the repository: {\"tests\": {\"uiSources\": {\"\(target)\": \"<folder>\"}}}"
+        if let folder = uiSources { return "\(target): tests.uiSources names \(folder), which holds no Swift file" }
+        let synced = PBX.synchronizedFolders(target: target, pbx: pbx)
+        if !synced.isEmpty {
+            return "\(target): no Swift file in its synchronized folders (\(synced.joined(separator: ", "))) or its Sources build phase in \(project); \(setting)"
+        }
+        return "\(target): no synchronized folder, no Swift file in its Sources build phase in \(project), and no folder \(projectDir)/\(target); \(setting)"
+    }
+
+    /// The error of a run with no filter that finds no test method.
+    static func noTestsMessage(_ targets: [UITarget]) -> String {
+        targets.map { t in
+            let unknown = discover(t).unknownSuperclasses.map { "\($0.cls) inherits from \($0.superclass), which no file of \(t.name) declares" }
+            return "found no test methods in \(t.name) (\(t.sources.count) Swift file(s)): simless looks for `func test...()` in classes "
+                + "whose chain of superclasses, declared in these files, reaches XCTestCase, and in extensions of them"
+                + (unknown.isEmpty ? "" : "; " + unknown.joined(separator: "; "))
+        }.joined(separator: "\n")
     }
 
     /// UI hosts are light (about 1.5 GB each) and mostly wait on the app, so up to

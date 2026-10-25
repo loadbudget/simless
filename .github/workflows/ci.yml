@@ -100,6 +100,12 @@ jobs:
           simless render EditProfileView.Sheet --idiom phone | tee sheet.txt
           grep -q "idiom phone" sheet.txt && rm sheet.txt
           simless render all --idiom phone
+          # Code that reads the device's idiom sees phone too, and pad again after it.
+          # Only the kit path: CI has no build of the demo without the kit.
+          simless render DeviceIdiomView.Idiom --idiom phone | tee idiom.txt
+          grep -q '"device idiom phone"' idiom.txt
+          simless render DeviceIdiomView.Idiom | tee idiom.txt
+          grep -q '"device idiom pad"' idiom.txt && rm idiom.txt
           # A List that a .task brings in after the first frame: its rows are read,
           # with and without --settle.
           simless render InboxView.Loaded | tee inbox.txt

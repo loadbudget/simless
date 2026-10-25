@@ -28,4 +28,19 @@ final class RenderChecksTests: XCTestCase {
         XCTAssertEqual(issues([["role": "switch", "value": "0", "frame": [305.0, 456, 61, 28]]]),
                        ["switch without accessibility label @305,456 61×28"])
     }
+
+    func traits(idiom: String, deviceIdiom: String) -> [String: Any] {
+        ["traits": ["horizontalSizeClass": "compact", "verticalSizeClass": "regular", "idiom": idiom,
+                    "deviceIdiom": deviceIdiom, "safeArea": [62.0, 0, 34, 0]]]
+    }
+
+    func testThePhoneIdiomOnTheDeviceTooNeedsNoNote() {
+        XCTAssertEqual(Render.traitsText(traits(idiom: "phone", deviceIdiom: "phone"), device: "iphone"),
+                       ["  traits: compact/regular size class, idiom phone, safe area top 62 bottom 34"])
+    }
+
+    func testADeviceThatStillReportsPadIsNoted() {
+        let lines = Render.traitsText(traits(idiom: "phone", deviceIdiom: "pad"), device: "iphone")
+        XCTAssertEqual(lines.last, "  note: UIDevice.current.userInterfaceIdiom still reports pad; views reading the trait collection see phone")
+    }
 }
