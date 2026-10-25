@@ -70,8 +70,8 @@ enum Slots {
         }
         let xctestrun = "\(slot.dir)/slot.xctestrun"
         try? fm.removeItem(atPath: xctestrun)
-        try retargetXCTestRun(from: src, to: xctestrun,
-                              hostBundleID: settings.bundleID, slotID: slot.slotID)
+        try retargetXCTestRun(from: src, to: xctestrun, hostBundleID: settings.bundleID, slotID: slot.slotID,
+                              runtime: "\(slot.dir)/SimlessRuntime.dylib")
         // The runtime every launch of this slot injects (Dynamic Type, original
         // bundle ids, the test runner), outside the app so it never needs re-signing.
         let runtime = try RuntimeBuild.dylib(team: settings.team)
@@ -104,10 +104,16 @@ enum Slots {
     }
 
     /// Copies the build's .xctestrun with the test host's bundle id swapped for
-    /// the slot's, and SIMLESS_HEADLESS set so install and test runs never show a
-    /// window. Handles both formats: v2 (`TestConfigurations[].TestTargets[]`,
-    /// schemes with a test plan) and v1 (test targets as top-level keys).
-    private static func retargetXCTestRun(from src: String, to dst: String, hostBundleID: String, slotID: String) throws {
+    /// the slot's, SIMLESS_HEADLESS set, and the slot's SimlessRuntime (`runtime`)
+    /// inserted into the app it hosts, so the install run never shows a window,
+    /// with or without SimlessKit. Handles both formats: v2
+    /// (`TestConfigurations[].TestTargets[]`, schemes with a test plan) and v1
+    /// (test targets as top-level keys). A file this function wrote already
+    /// (its host is `slotID`) gets the same edit again, so `install` brings a
+    /// file of an older simless up to date. With `reportPort`, the runtime
+    /// reports to simless on that port that it loaded and hides the app.
+    static func retargetXCTestRun(from src: String, to dst: String, hostBundleID: String, slotID: String, runtime: String,
+                                  reportPort: Int? = nil) throws {
         guard let data = FileManager.default.contents(atPath: src),
               var plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
             throw SimlessError("could not read \(src)")
@@ -117,7 +123,16 @@ enum Slots {
             var env = t["EnvironmentVariables"] as? [String: Any] ?? [:]
             env["SIMLESS_HEADLESS"] = "1"
             t["EnvironmentVariables"] = env
-            if t["TestHostBundleIdentifier"] as? String == hostBundleID { t["TestHostBundleIdentifier"] = slotID }
+            if let host = t["TestHostBundleIdentifier"] as? String, host == hostBundleID || host == slotID {
+                t["TestHostBundleIdentifier"] = slotID
+                // xcodebuild starts the test host with these, its own inserted
+                // libraries (libXCTestBundleInject) first; the runtime goes after them.
+                var testing = t["TestingEnvironmentVariables"] as? [String: Any] ?? [:]
+                let inserted = (testing["DYLD_INSERT_LIBRARIES"] as? String).map { $0.split(separator: ":").map(String.init) } ?? []
+                testing["DYLD_INSERT_LIBRARIES"] = (inserted.filter { $0 != runtime } + [runtime]).joined(separator: ":")
+                testing["SIMLESS_INSTALL_REPORT"] = reportPort.map(String.init)
+                t["TestingEnvironmentVariables"] = testing
+            }
             return t
         }
         if let configs = plist["TestConfigurations"] as? [[String: Any]] {
@@ -208,8 +223,14 @@ enum Slots {
             let t = now()
             stop(slot)
             let log = "\(slot.dir)/install.log"
+            let xctestrun = "\(slot.dir)/slot.xctestrun"
+            // The runtime reports on this socket that it loaded into the app and hides it.
+            let report = try reportSocket()
+            defer { close(report.fd) }
+            try retargetXCTestRun(from: xctestrun, to: xctestrun, hostBundleID: slot.slotID, slotID: slot.slotID,
+                                  runtime: "\(slot.dir)/SimlessRuntime.dylib", reportPort: report.port)
             // -derivedDataPath keeps xcodebuild's logs out of ~/Library/Developer/Xcode/DerivedData.
-            let r = try Shell.run(["xcodebuild", "test-without-building", "-xctestrun", "\(slot.dir)/slot.xctestrun",
+            let r = try Shell.run(["xcodebuild", "test-without-building", "-xctestrun", xctestrun,
                                    "-derivedDataPath", ws.derivedData,
                                    "-destination", Workspace.dfiDestination,
                                    "-only-testing:\(ws.config.testTarget)/SimlessInstallOnly"],
@@ -224,9 +245,24 @@ enum Slots {
                                    + r.out.split(separator: "\n").suffix(8).joined(separator: "\n"))
             }
             terminateAll(slot)
+            if let error = installHidingError(slotID: slot.slotID, kitInBuild: (try? currentSlot(ws))?.kitInBuild ?? true,
+                                              reported: receivedReport(report.fd), xctestrun: xctestrun, log: log) {
+                throw SimlessError(error)
+            }
             hideExtensions(slot)
             Log.step("installed \(slot.slotID) in \(secs(t))")
         }
+    }
+
+    /// Why an install run that SimlessRuntime did not report from fails, or nil.
+    /// Without the kit, only the runtime keeps the app's window off the screen,
+    /// so a run it never loaded into stops here. With the kit, the kit hides the
+    /// app, as it did before the runtime was inserted.
+    static func installHidingError(slotID: String, kitInBuild: Bool, reported: Bool, xctestrun: String, log: String) -> String? {
+        guard !kitInBuild, !reported else { return nil }
+        return "SimlessRuntime did not load into the install run of \(slotID), so nothing hid the app's window. "
+            + "simless inserts it with DYLD_INSERT_LIBRARIES in TestingEnvironmentVariables of \(xctestrun); "
+            + "xcodebuild did not pass it to the app. Log: \(log)"
     }
 
     /// Launches the host headless and waits until it answers. `locale` (e.g.

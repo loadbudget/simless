@@ -3,6 +3,45 @@
 
 import Foundation
 
+/// A listening socket on 127.0.0.1 at a port the OS picks, for one report
+/// from a process simless starts.
+func reportSocket() throws -> (fd: Int32, port: Int) {
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    guard fd >= 0 else { throw SimlessError("cannot open a socket for the runtime's report") }
+    var addr = sockaddr_in()
+    addr.sin_family = sa_family_t(AF_INET)
+    addr.sin_port = 0
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+    var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+    let bound = withUnsafeMutablePointer(to: &addr) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, len) == 0 && getsockname(fd, $0, &len) == 0 }
+    }
+    guard bound, listen(fd, 8) == 0 else {
+        close(fd)
+        throw SimlessError("cannot listen on 127.0.0.1 for the runtime's report")
+    }
+    return (fd, Int(UInt16(bigEndian: addr.sin_port)))
+}
+
+/// Whether a connection that is already waiting on `fd` sent "headless". It
+/// accepts without waiting, so it reads only what came before the call.
+func receivedReport(_ fd: Int32) -> Bool {
+    let flags = fcntl(fd, F_GETFL)
+    _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+    while true {
+        let conn = accept(fd, nil, nil)
+        guard conn >= 0 else { return false }
+        defer { close(conn) }
+        // An accepted socket inherits O_NONBLOCK from the listener: read with a timeout instead.
+        _ = fcntl(conn, F_SETFL, fcntl(conn, F_GETFL) & ~O_NONBLOCK)
+        var tv = timeval(tv_sec: 1, tv_usec: 0)
+        setsockopt(conn, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        var buf = [UInt8](repeating: 0, count: 64)
+        let n = read(conn, &buf, buf.count)
+        if n > 0, String(decoding: buf[0..<n], as: UTF8.self).hasPrefix("headless") { return true }
+    }
+}
+
 /// Newline-delimited JSON over TCP (render hosts) or a Unix socket (the agent).
 final class LineClient {
     let fd: Int32

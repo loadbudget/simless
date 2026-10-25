@@ -3,6 +3,9 @@
 
 import Foundation
 
+/// Outside main.swift, so tests read it too: a global there is set only when `main` runs.
+let version = "0.7.2"
+
 struct SimlessError: Error, CustomStringConvertible {
     let description: String
     init(_ message: String) { description = message }

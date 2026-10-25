@@ -814,11 +814,10 @@ final class Session {
         wipe()
         let token = UUID().uuidString
         try? "\(token)\n\(mtime("\(slot.dir)/SimlessRuntime.dylib"))".write(toFile: "\(slot.dir)/standby-token", atomically: true, encoding: .utf8)
-        let env = RuntimeHost.baseEnvironment(slot).merging(environment()) { $1 }
-            .merging(["SIMLESS_RUNTIME_PORT": String(slot.port), "SIMLESS_HOST_TOKEN": token,
-                      // A standby host runs the app's idle work (animations, timers) for
-                      // nothing; it goes away after 10 minutes without a run.
-                      "SIMLESS_IDLE": String(ws.standbyIdleMinutes * 60)]) { $1 }
+        let env = RuntimeHost.testEnvironment(slot, extra: environment().merging(["SIMLESS_HOST_TOKEN": token,
+            // A standby host runs the app's idle work (animations, timers) for
+            // nothing; it goes away after 10 minutes without a run.
+            "SIMLESS_IDLE": String(ws.standbyIdleMinutes * 60)]) { $1 })
         guard let app = try? RuntimeHost.installedApp(slot) else { return }
         if Native.isNative(slot) {
             _ = try? Native.launch(slot, env: env, args: [], log: "\(slot.dir)/standby.log")

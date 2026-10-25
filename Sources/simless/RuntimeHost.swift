@@ -60,10 +60,16 @@ enum RuntimeHost {
 
     /// Copies `dylib`, a runtime of the current build, into the slot with the
     /// module of that build, and records the build.
+    /// The rename replaces the slot's copy in one step, so a launch (or an
+    /// install run) that starts meanwhile inserts the old file or the new one.
     static func installRuntime(_ slot: SlotRecord, dylib: String) throws {
         let copy = "\(slot.dir)/SimlessRuntime.dylib"
-        try? FileManager.default.removeItem(atPath: copy)
-        try FileManager.default.copyItem(atPath: dylib, toPath: copy)
+        let tmp = "\(slot.dir)/.\(UUID().uuidString).dylib"
+        try FileManager.default.copyItem(atPath: dylib, toPath: tmp)
+        guard rename(tmp, copy) == 0 else {
+            try? FileManager.default.removeItem(atPath: tmp)
+            throw SimlessError("could not place SimlessRuntime.dylib in \(slot.slotID): \(String(cString: strerror(errno)))")
+        }
         let build = try RuntimeBuild.moduleDir()
         try installModule(slot, build: build)
         try recordInjected(slot, build: build)
@@ -161,6 +167,13 @@ enum RuntimeHost {
         return env
     }
 
+    /// Environment of a test host (unit tests, package tests, a standby host):
+    /// the base, the runtime's port, then `extra`. SIMLESS_HEADLESS in the base
+    /// makes the runtime hide the host, with or without the kit.
+    static func testEnvironment(_ slot: SlotRecord, extra: [String: String]) -> [String: String] {
+        baseEnvironment(slot).merging(["SIMLESS_RUNTIME_PORT": String(slot.port)]) { $1 }.merging(extra) { $1 }
+    }
+
     /// Set to "1" on a render host whose app has no SimlessKit: SimlessRuntime
     /// then serves renders on `--simless-port`. Never set when the app has the
     /// kit, so one server listens on the port.
@@ -240,9 +253,7 @@ enum RuntimeHost {
     private static func launchOnce(_ slot: SlotRecord, env extra: [String: String], args: [String], timeout: Double) throws {
         terminateAll(slot)
         let app = try installedApp(slot)
-        var env = baseEnvironment(slot)
-        env["SIMLESS_RUNTIME_PORT"] = String(slot.port)
-        for (k, v) in extra { env[k] = v }
+        let env = testEnvironment(slot, extra: extra)
         try? FileManager.default.removeItem(atPath: "\(slot.dir)/host.log")
         if Native.isNative(slot) {
             try Native.launch(slot, env: env, args: args, log: "\(slot.dir)/host.log")

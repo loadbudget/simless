@@ -5,17 +5,38 @@ import Foundation
 import ObjectiveC
 import MachO
 
-/// Keeps a UI test host invisible without SIMLESS_HEADLESS: that variable tells
-/// the app it's a render host (apps skip analytics and sync on it), while a UI
-/// test needs the app's real launch, as XCUITest gives it. Window ordering is
-/// made a no-op as soon as AppKit loads, before the first window exists.
+/// Keeps a host simless launched invisible, with or without SimlessKit: render,
+/// unit test and install runs (SIMLESS_HEADLESS) and UI test hosts (SIMLESS_UI,
+/// which leave SIMLESS_HEADLESS out for the app's real launch). Window ordering
+/// is made a no-op as soon as AppKit loads, before the first window exists.
 enum Headless {
     private static var done = false
+    private static var installed = false
 
     static func install() {
+        guard !installed else { return }
+        installed = true
+        runtimeLog("headless")
         _dyld_register_func_for_add_image { _, _ in Headless.tryInstall() }
         DispatchQueue.main.async { tryInstall(); hide() }
         NotificationCenter.default.addObserver(forName: NSNotification.Name("UIWindowDidBecomeVisibleNotification"), object: nil, queue: .main) { _ in hide() }
+    }
+
+    /// Sends "headless" to simless on 127.0.0.1:`port`. Nothing waits for an
+    /// answer, and a refused connection changes nothing in the app.
+    static func report(port: UInt16) {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return }
+        defer { close(fd) }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = in_port_t(port.bigEndian)
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let connected = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+        }
+        guard connected == 0 else { return runtimeLog("could not report to simless on port \(port)") }
+        _ = "headless\n".withCString { write(fd, $0, strlen($0)) }
     }
 
     static func tryInstall() {
