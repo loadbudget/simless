@@ -33,13 +33,97 @@ enum RuntimeHost {
     }
 
     /// A newer simless brings a newer runtime; slots pick it up without a reinstall.
+    /// A host without the kit keeps the runtime it has: see `keepsInjectedRuntime`.
     static func refreshRuntime(_ slot: SlotRecord, team: String) throws {
+        if keepsInjectedRuntime(slot, current: RuntimeBuild.currentDir()) { return }
         let runtime = Native.isNative(slot) ? try RuntimeBuild.nativeDylib() : try RuntimeBuild.dylib(team: team)
         let copy = "\(slot.dir)/SimlessRuntime.dylib"
         if mtime(copy) < mtime(runtime) || (try? FileManager.default.attributesOfItem(atPath: copy)[.size] as? Int) != (try? FileManager.default.attributesOfItem(atPath: runtime)[.size] as? Int) {
-            try? FileManager.default.removeItem(atPath: copy)
-            try FileManager.default.copyItem(atPath: runtime, toPath: copy)
+            try installRuntime(slot, dylib: runtime)
+        } else {
+            _ = try currentModule(slot)
+            try recordInjected(slot, build: try RuntimeBuild.moduleDir())
         }
+    }
+
+    /// Whether a launch keeps the slot's runtime copy although another runtime
+    /// build is current. Without the kit, the previews dylib and the patches a
+    /// host loads were compiled against the module of the runtime it injects,
+    /// and a newer runtime can lay out SimlessRegistry differently. So only
+    /// `up` replaces that runtime, and `reload` runs `up` when it changed
+    /// (`fullBuildReason`). With the kit, the dylibs use the kit's registry.
+    static func keepsInjectedRuntime(_ slot: SlotRecord, current: String) -> Bool {
+        // A copy with no record is from an older simless, and of no known build.
+        guard !slot.kitInBuild, exists("\(slot.dir)/SimlessRuntime.dylib") else { return false }
+        return injectedBuild(slot) != current
+    }
+
+    /// Copies `dylib`, a runtime of the current build, into the slot with the
+    /// module of that build, and records the build.
+    static func installRuntime(_ slot: SlotRecord, dylib: String) throws {
+        let copy = "\(slot.dir)/SimlessRuntime.dylib"
+        try? FileManager.default.removeItem(atPath: copy)
+        try FileManager.default.copyItem(atPath: dylib, toPath: copy)
+        let build = try RuntimeBuild.moduleDir()
+        try installModule(slot, build: build)
+        try recordInjected(slot, build: build)
+    }
+
+    /// The runtime build that the slot's SimlessRuntime.dylib copy came from,
+    /// or nil when the slot has no record (a slot from an older simless).
+    static func injectedBuild(_ slot: SlotRecord) -> String? {
+        try? String(contentsOfFile: injectedRecord(slot), encoding: .utf8)
+    }
+    static func injectedRecord(_ slot: SlotRecord) -> String { "\(slot.dir)/runtime-build.txt" }
+    static func recordInjected(_ slot: SlotRecord, build: String) throws {
+        try build.write(toFile: injectedRecord(slot), atomically: true, encoding: .utf8)
+    }
+
+    /// The folder of the slot's copy of SimlessRuntime.swiftmodule, for `-I`.
+    /// It is copied with each copy of the runtime the slot injects, so a dylib
+    /// compiled against it binds to that runtime.
+    static func moduleDir(_ slot: SlotRecord) -> String { "\(slot.dir)/runtime-module" }
+    static func module(_ slot: SlotRecord) -> String { "\(moduleDir(slot))/SimlessRuntime.swiftmodule" }
+    /// The runtime build folder the slot's module copy came from.
+    static func moduleBuild(_ slot: SlotRecord) -> String { "\(moduleDir(slot))/build.txt" }
+
+    /// Copies the module of the runtime build in folder `build` into the slot,
+    /// and records which build it is. The rename replaces it in one step, so a
+    /// compile that reads it meanwhile reads the old file or the new one.
+    static func installModule(_ slot: SlotRecord, build: String) throws {
+        try mkdirp(moduleDir(slot))
+        let tmp = "\(moduleDir(slot))/.\(UUID().uuidString).swiftmodule"
+        try FileManager.default.copyItem(atPath: "\(build)/SimlessRuntime.swiftmodule", toPath: tmp)
+        guard rename(tmp, module(slot)) == 0 else {
+            try? FileManager.default.removeItem(atPath: tmp)
+            throw SimlessError("could not place SimlessRuntime.swiftmodule in \(slot.slotID): \(String(cString: strerror(errno)))")
+        }
+        try build.write(toFile: moduleBuild(slot), atomically: true, encoding: .utf8)
+    }
+
+    /// The folder of the slot's module copy from the runtime build in folder
+    /// `build`. Copies that build's module when the slot has none, or one
+    /// from another build.
+    static func currentModule(_ slot: SlotRecord, build: String) throws -> String {
+        if !exists(module(slot)) || (try? String(contentsOfFile: moduleBuild(slot), encoding: .utf8)) != build {
+            try installModule(slot, build: build)
+        }
+        return moduleDir(slot)
+    }
+
+    /// The same for the current runtime build, waiting for it while it builds.
+    static func currentModule(_ slot: SlotRecord) throws -> String {
+        try currentModule(slot, build: try RuntimeBuild.moduleDir())
+    }
+
+    /// The module a dylib for the running host compiles against: the one of
+    /// the runtime the slot injects. It must be the current build, because
+    /// the slot keeps no module of an older one.
+    static func injectedModule(_ slot: SlotRecord, current: String = RuntimeBuild.currentDir()) throws -> String {
+        guard injectedBuild(slot) == current else {
+            throw SimlessError("SimlessRuntime changed since `simless up` installed \(slot.slotID); run `simless up`")
+        }
+        return try currentModule(slot)
     }
 
     static func installedApp(_ slot: SlotRecord) throws -> String {
@@ -75,6 +159,20 @@ enum RuntimeHost {
             env["SIMLESS_NETWORK"] = network
         }
         return env
+    }
+
+    /// Set to "1" on a render host whose app has no SimlessKit: SimlessRuntime
+    /// then serves renders on `--simless-port`. Never set when the app has the
+    /// kit, so one server listens on the port.
+    static let renderServerKey = "SIMLESS_RENDER_SERVER"
+
+    static func renderServer(kitInApp: Bool) -> [String: String] { kitInApp ? [:] : [renderServerKey: "1"] }
+
+    /// Environment of a render host: the base, and the render server when the
+    /// installed build has no kit to serve renders. From the slot's record of
+    /// that build, not from the sources, which can have changed since.
+    static func renderEnvironment(_ slot: SlotRecord) -> [String: String] {
+        baseEnvironment(slot).merging(renderServer(kitInApp: slot.kitInBuild)) { $1 }
     }
 
     /// What a host may reach, as SimlessRuntime reads it (Runtime/Network.swift),

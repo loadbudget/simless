@@ -331,7 +331,9 @@ enum Previews {
     /// Compiles the previews and root for the current build. Previews that
     /// don't compile are left out with the reason, a few rounds at most. If
     /// the last round still fails, the manifest is saved with the reasons
-    /// and the build throws.
+    /// and the build throws. A build without SimlessKit gets its fixtures only
+    /// from this dylib, so it is built for it even with no preview, or with
+    /// `"previews": false`.
     @discardableResult
     static func build(ws: Workspace, slot: SlotRecord, settings: Workspace.Settings) throws -> Manifest {
         let t = now()
@@ -339,14 +341,16 @@ enum Previews {
         try? FileManager.default.removeItem(atPath: d)
         try mkdirp(d)
         var input = PatchScope.input(ws: ws, edited: [])
-        input.sources = input.sources.filter { $0.value.contains("#Preview") || $0.value.contains("PreviewProvider") || $0.value.contains("@main") }
-        let m = try compileLeavingOut(input) { gen, prelude in
+        input.sources = ws.config.previews == false ? [:]
+            : input.sources.filter { $0.value.contains("#Preview") || $0.value.contains("PreviewProvider") || $0.value.contains("@main") }
+        let m = try compileLeavingOut(input, alwaysBuild: !slot.kitInBuild) { gen, prelude in
             try Patch.compile(ws: ws, slot: slot, settings: settings, files: gen.texts.keys.sorted(), texts: gen.texts,
-                              name: "SimlessPreviews", dir: d, prelude: prelude, entry: "        simlessRegisterPreviews(r)")
+                              name: "SimlessPreviews", dir: d, prelude: prelude, entry: "        simlessRegisterPreviews(r)",
+                              forNewBuild: true)
         }
         try save(ws, m)
         if let failure = m.failure { throw SimlessError(failure) }
-        if m.dylib != nil {
+        if m.dylib != nil, !m.entries.isEmpty {
             let made = m.entries.filter { $0.skipped == nil }.count
             Log.step("previews: \(made) fixture(s) from #Preview\(m.entries.contains { $0.name == "root" } ? " and the App" : "") in \(secs(t))")
         }
@@ -356,14 +360,15 @@ enum Previews {
     /// Compiles the generated previews with `compile`, which gets them and the
     /// prelude and returns the library. Each failed round leaves out the
     /// previews its errors are in. If a round still fails after `rounds`, the
-    /// manifest has no library and says why in `failure`.
-    static func compileLeavingOut(_ input: PatchScope.Input, rounds: Int = 5,
+    /// manifest has no library and says why in `failure`. With no preview
+    /// left, there is no library unless `alwaysBuild` (the fixtures alone).
+    static func compileLeavingOut(_ input: PatchScope.Input, rounds: Int = 5, alwaysBuild: Bool = false,
                                   compile: (Generated, String) throws -> String) throws -> Manifest {
         var skip: [String: String] = [:]
         var lastError: SimlessError?
         for _ in 0..<rounds {
             let gen = generate(input, skip: skip)
-            guard !gen.calls.isEmpty else { return Manifest(dylib: nil, entries: gen.entries) }
+            guard !gen.calls.isEmpty || alwaysBuild else { return Manifest(dylib: nil, entries: gen.entries) }
             let calls = gen.calls.map { "    \($0)(r)" }.joined(separator: "\n")
             let prelude = helpers + "\n" + registrations + "\n\n@MainActor func simlessRegisterPreviews(_ r: SimlessRegistry) {\n\(calls)\n}\n"
             do {

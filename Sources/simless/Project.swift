@@ -100,6 +100,11 @@ struct Workspace {
     static let iosDestination = "generic/platform=iOS"
     var native: Bool { Native.enabled(self) }
     var destination: String { native ? Self.iosDestination : Self.dfiDestination }
+    /// Whether the app carries SimlessKit (`kitFile`). Such an app serves
+    /// renders itself, and the dylibs simless compiles use its SimlessRegistry.
+    /// Without the kit, SimlessRuntime serves renders, and the dylibs import
+    /// SimlessRuntime for its registry.
+    var kitInApp: Bool { exists("\(root)/\(config.kitFile)") }
 
     static func findRoot(from start: String = FileManager.default.currentDirectoryPath) -> String? {
         var url = URL(fileURLWithPath: start)

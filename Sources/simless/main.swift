@@ -425,6 +425,8 @@ func cmdUp(_ args: Args) throws {
     try ws.root.write(toFile: "\(ws.work)/worktree.txt", atomically: true, encoding: .utf8)
     let previousSnapshot = try? Data(contentsOf: URL(fileURLWithPath: ws.snapshotPath))
     let sourcesID = try ws.snapshotSources()
+    // Who serves renders in this build, as of its start (recorded once it succeeds).
+    let kitInApp = ws.kitInApp
     // What this build is built from, as of its start (recorded once it succeeds).
     let inputs = BuildState.current(ws, previous: BuildState.load(ws) ?? [:])
     try? FileManager.default.removeItem(atPath: BuildState.path(ws))
@@ -466,6 +468,7 @@ func cmdUp(_ args: Args) throws {
     // The fresh build contains every edit; earlier patches must not be re-applied.
     slot.builtAt = buildStart
     slot.build = sourcesID
+    slot.builtWithKit = kitInApp
     slot.sources = sourcesID
     slot.patch = 0
     slot.lastPatch = nil
@@ -484,7 +487,8 @@ func cmdUp(_ args: Args) throws {
     // Fixtures from #Preview blocks and the App, compiled while the slot gets ready.
     let previewsBuilt = DispatchGroup()
     var previewsError: Error?
-    if ws.config.previews != false {
+    // An app without SimlessKit gets its fixtures from this dylib alone.
+    if ws.config.previews != false || !slot.kitInBuild {
         DispatchQueue.global().async(group: previewsBuilt) {
             do { try Previews.build(ws: ws, slot: slot, settings: settings) } catch { previewsError = error }
         }
@@ -633,6 +637,20 @@ func render(slot: SlotRecord, target: String, args: Args, ws: Workspace) throws 
     }
 }
 
+/// Why `reload` must build the app again instead of patching it, if it must:
+/// the kit was edited, or added or deleted since the build the host runs. A
+/// patch binds to the registry of the installed build, so it can't cross a
+/// change of who serves renders. Without the kit, the registry is
+/// SimlessRuntime's, so a patch can't cross a change of the runtime either.
+/// `currentRuntime` is the current runtime build's folder.
+func fullBuildReason(ws: Workspace, slot: SlotRecord, files: [String],
+                     currentRuntime: () -> String = RuntimeBuild.currentDir) -> String? {
+    if ws.kitInApp != slot.kitInBuild { return ws.kitInApp ? "SimlessKit added" : "SimlessKit deleted" }
+    if files.contains("\(ws.root)/\(ws.config.kitFile)") { return "SimlessKit changed" }
+    if !slot.kitInBuild, RuntimeHost.injectedBuild(slot) != currentRuntime() { return "SimlessRuntime changed" }
+    return nil
+}
+
 func cmdReload(_ args: Args) throws {
     let ws = try Workspace.load()
     if args.flags.contains("--dry-run") { return try reloadDryRun(ws, args) }
@@ -644,8 +662,11 @@ func cmdReload(_ args: Args) throws {
     let files = args.positional.isEmpty
         ? ws.changedSources()
         : args.positional.map { $0.hasPrefix("/") ? $0 : "\(FileManager.default.currentDirectoryPath)/\($0)" }
-    let kit = "\(ws.root)/\(ws.config.kitFile)"
-    if files.isEmpty && slot.patch > 0 {
+    if let fullBuild = fullBuildReason(ws: ws, slot: slot, files: files) {
+        Log.step("\(fullBuild); full rebuild")
+        try cmdUp(args)
+        slot = try currentSlot(ws)
+    } else if files.isEmpty && slot.patch > 0 {
         // The edits were undone: the host still runs the last patch, so start it
         // again from the build, which is what the sources say now.
         Slots.stop(slot)
@@ -659,10 +680,6 @@ func cmdReload(_ args: Args) throws {
         print("edits since the last `simless up` were undone; the host shows that build again")
     } else if files.isEmpty {
         print("nothing edited since the last `simless up`")
-    } else if files.contains(kit) {
-        Log.step("SimlessKit changed; full rebuild")
-        try cmdUp(args)
-        slot = try currentSlot(ws)
     } else {
         // `--render X` only needs the views between X and the edit.
         let target = args.values["--render"]
@@ -699,9 +716,10 @@ func reloadDryRun(_ ws: Workspace, _ args: Args) throws {
     let files = args.positional.isEmpty
         ? ws.changedSources()
         : args.positional.map { $0.hasPrefix("/") ? $0 : "\(FileManager.default.currentDirectoryPath)/\($0)" }
+    let slot = try? currentSlot(ws)
+    if let slot, let reason = fullBuildReason(ws: ws, slot: slot, files: files) { print("would rebuild: \(reason)"); return }
     if files.isEmpty { print("nothing edited since the last `simless up`"); return }
     let fixtures = args.values["--render"].flatMap { $0 == "all" ? nil : [$0] }
-    let slot = try? currentSlot(ws)
     let t = now()
     let s = try slot.map { try Patch.scope(ws: ws, slot: $0, files: files, fixtures: fixtures) }
         ?? PatchScope.files(ws: ws, edited: files, fixtures: fixtures)

@@ -23,6 +23,10 @@ enum Calibrate {
     }
 
     static func run(ws: Workspace, slot: SlotRecord, options: Options) throws {
+        // In the simulator only the kit serves renders: SimlessRuntime isn't loaded there.
+        guard ws.kitInApp else {
+            throw SimlessError("`simless calibrate` needs \(ws.config.kitFile) in the app for now: SimlessRuntime, which serves renders without it, isn't loaded in the iOS Simulator")
+        }
         let t = now()
         let host = slot.stats() == nil ? try {
             let s = try GlobalState.withFreePort(slot)

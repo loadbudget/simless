@@ -105,8 +105,7 @@ enum Native {
         try signInsideOut(changed + [exe])
 
         let runtime = try RuntimeBuild.nativeDylib()
-        try? fm.removeItem(atPath: "\(slot.dir)/SimlessRuntime.dylib")
-        try fm.copyItem(atPath: runtime, toPath: "\(slot.dir)/SimlessRuntime.dylib")
+        try RuntimeHost.installRuntime(slot, dylib: runtime)
         try settings.bundleID.write(toFile: "\(slot.dir)/original-id.txt", atomically: true, encoding: .utf8)
         try makeHome(slot)
         fm.createFile(atPath: marker(slot), contents: nil)
@@ -282,14 +281,20 @@ enum Native {
     @discardableResult
     static func launch(_ slot: SlotRecord, env extra: [String: String], args: [String], log: String) throws -> pid_t {
         let exe = executable(try app(slot))
+        try? FileManager.default.removeItem(atPath: log)
+        return try spawn(exe, args: args, env: spawnEnvironment(slot, extra: extra), log: log)
+    }
+
+    /// The whole environment a native host starts with: a few of simless's
+    /// own variables, the slot's, then `extra`.
+    static func spawnEnvironment(_ slot: SlotRecord, extra: [String: String]) -> [String: String] {
         var env: [String: String] = [:]
         let mine = ProcessInfo.processInfo.environment
         for key in ["USER", "LOGNAME", "SHELL", "LANG", "SIMLESS_PERMISSIONS", "SIMLESS_DYNAMIC_TYPE"] { env[key] = mine[key] }
         env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
         for (k, v) in environment(slot) { env[k] = v }
         for (k, v) in extra { env[k] = v }
-        try? FileManager.default.removeItem(atPath: log)
-        return try spawn(exe, args: args, env: env, log: log)
+        return env
     }
 
     /// posix_spawn in a session of its own, with only stdin (/dev/null) and the

@@ -145,7 +145,7 @@ That's all. Older versions ran the app as a signed "Designed for iPad" install, 
 `simless init` creates:
 
 - `.simless.json`
-- `<App>/Simless/SimlessKit.swift`: the render host. It's generated, compiled only in simless builds (`#if SIMLESS`), and does nothing unless simless launches the app.
+- `<App>/Simless/SimlessKit.swift`: the render host. It's generated, compiled only in simless builds (`#if SIMLESS`), and does nothing unless simless launches the app. When this file is not there, SimlessRuntime serves renders instead (see [architecture](docs/architecture.md#3-the-render-host-simlesskit-or-simlessruntime)).
 - `<App>/Simless/SimlessFixtures.swift`: your screens.
 
 It also adds one call to your `@main` App's `init()` (pass `--no-hook` to skip that):

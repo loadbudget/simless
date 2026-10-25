@@ -7,7 +7,9 @@ import Foundation
 /// file, into a small dylib (its own module, `@testable import`ing the app).
 /// The patch's copies of the edited types shadow the app's, so its
 /// `simlessFixtures` builds every fixture from the new code. Everything else
-/// resolves against the app's debug dylib at load time.
+/// resolves against the app's debug dylib at load time. SimlessRegistry comes
+/// from SimlessKit in the app, or from SimlessRuntime when the installed build
+/// has no kit (`SlotRecord.kitInBuild`).
 enum Patch {
     enum Mode: String { case live, warm }
 
@@ -83,11 +85,32 @@ enum Patch {
             }
     """
 
+    /// What each source copied into a patch starts with. Every involved module
+    /// is in scope (@testable, for internal declarations); the source's own
+    /// types shadow theirs. Without SimlessKit in the app, SimlessRuntime gives
+    /// SimlessRegistry. It shares the first line, so compiler errors keep an
+    /// offset of one line per module.
+    static func sourceHeader(modules: [String], kitInApp: Bool) -> String {
+        (kitInApp ? "" : "import SimlessRuntime; ") + modules.map { "@testable import \($0)\n" }.joined()
+    }
+
+    /// The iOS version a patch compiles for. SimlessRuntime's module is built
+    /// for iOS 17.0, and a module can't be imported by code for an older iOS.
+    static func target(deploymentTarget: String, kitInApp: Bool) -> String {
+        if kitInApp { return deploymentTarget }
+        let parts = { (v: String) in v.split(separator: ".").map { Int($0) ?? 0 } }
+        return parts(deploymentTarget).lexicographicallyPrecedes(parts(RuntimeBuild.iosTarget)) ? RuntimeBuild.iosTarget : deploymentTarget
+    }
+
     /// `prelude` is top-level code for the entry file, `entry` runs after
     /// `simlessFixtures` with `r` (the registry) and `address` in scope.
+    /// `forNewBuild` is for `up`, which prepares the slot with the current
+    /// runtime meanwhile: without the kit, the dylib then compiles against the
+    /// current runtime's module. Otherwise it compiles against the module of
+    /// the runtime the slot injects.
     static func compile(ws: Workspace, slot: SlotRecord, settings: Workspace.Settings, files: [String],
                         texts: [String: String] = [:], name: String = "SimlessPatch", dir: String? = nil,
-                        prelude: String = "", entry entryCode: String = registerPreviews) throws -> String {
+                        prelude: String = "", entry entryCode: String = registerPreviews, forNewBuild: Bool = false) throws -> String {
         let dir = dir ?? "\(ws.work)/patches"
         try mkdirp(dir)
         let module = "\(name)\(slot.n)x\(slot.patch + 1)x\(Int(Date().timeIntervalSince1970) % 100000)"
@@ -118,9 +141,9 @@ enum Patch {
         }
         let effective = distinct.first ?? appSettings
 
-        // Each source gets every involved module in scope (@testable, for internal
-        // declarations); its own types shadow theirs.
-        let imports = modulesInvolved.map { "@testable import \($0)\n" }.joined()
+        // The installed build's mode: the patch binds to the registry it has.
+        let kitInApp = slot.kitInBuild
+        let imports = sourceHeader(modules: modulesInvolved, kitInApp: kitInApp)
         var sources: [String] = []
         var originals: [String: String] = [:]   // patch copy -> edited file, for error messages
         for file in [fixtures] + files.filter({ $0 != fixtures }) {
@@ -133,6 +156,7 @@ enum Patch {
         let entry = "\(dir)/\(module)_entry.swift"
         try """
             import Foundation
+            \(kitInApp ? "" : "import SimlessRuntime")
             @testable import \(settings.moduleName)
             \(prelude)
             // The address crosses into the main actor as an Int (Sendable), so this
@@ -153,8 +177,8 @@ enum Patch {
         let sdk = try Shell.check(["xcrun", "--sdk", "iphoneos", "--show-sdk-path"]).trimmingCharacters(in: .whitespacesAndNewlines)
         let out = "\(dir)/\(module).dylib"
         var args = ["xcrun", "swiftc", "-module-name", module, "-emit-library", "-o", out,
-                    "-target", "arm64-apple-ios\(settings.deploymentTarget)", "-sdk", sdk, "-Onone",
-                    "-swift-version", effective.swiftVersion,
+                    "-target", "arm64-apple-ios\(target(deploymentTarget: settings.deploymentTarget, kitInApp: kitInApp))",
+                    "-sdk", sdk, "-Onone", "-swift-version", effective.swiftVersion,
                     "-I", ws.productsIphoneos, "-F", ws.productsIphoneos, "-Xcc", "-I\(ws.productsIphoneos)/include",
                     "-Xlinker", "-undefined", "-Xlinker", "dynamic_lookup",
                     "-suppress-warnings", "-module-cache-path", "\(ws.work)/ModuleCache",
@@ -167,6 +191,11 @@ enum Patch {
         // generated header, and every Swift-only type is "not in scope".
         let packageFrameworks = "\(ws.productsIphoneos)/PackageFrameworks"
         if exists(packageFrameworks) { args += ["-F", packageFrameworks] }
+        if !kitInApp {
+            // The module of the runtime the slot injects: a copy from an older
+            // build, or no copy yet, would bind the dylib to the wrong runtime.
+            args += ["-I", try forNewBuild ? RuntimeHost.currentModule(slot) : RuntimeHost.injectedModule(slot)]
+        }
         if let iso = effective.isolation { args += ["-default-isolation", iso] }
         for f in effective.features { args += ["-enable-upcoming-feature", f] }
         for c in settings.conditions { args += ["-D", c] }
