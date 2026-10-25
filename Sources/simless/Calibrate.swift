@@ -20,6 +20,7 @@ enum Calibrate {
         var runtime: String?     // iOS version, e.g. "26.5" (default: newest installed)
         var device: String?      // simulator device type (default: simDeviceType)
         var idiom: String?       // "phone": render the Mac side with the phone idiom
+        var settle: Double?      // ms each side gives the screen for async work before it's read
     }
 
     static func run(ws: Workspace, slot: SlotRecord, options: Options) throws {
@@ -67,15 +68,17 @@ enum Calibrate {
                 var a: [String: Any]
                 do {
                     a = try mac.call(Render.request(fixture: fixture, dark: dark, canvas: canvas, image: wantImage,
-                                                    idiom: options.idiom))
+                                                    idiom: options.idiom, settle: options.settle))
                 } catch where options.idiom != nil && host.stats() == nil {
                     // A Stepper under the phone idiom takes the Mac host down (see `render`).
                     Log.info("note: \(fixture) crashed the host under the phone idiom; comparing it with the iPad idiom")
                     try Slots.launch(host, idleMinutes: ws.idleMinutes)
                     mac = try host.client(timeout: 30)
-                    a = try mac.call(Render.request(fixture: fixture, dark: dark, canvas: canvas, image: wantImage))
+                    a = try mac.call(Render.request(fixture: fixture, dark: dark, canvas: canvas, image: wantImage,
+                                                    settle: options.settle))
                 }
-                let b = try sim.call(Render.request(fixture: fixture, dark: dark, canvas: canvas, image: wantImage))
+                let b = try sim.call(Render.request(fixture: fixture, dark: dark, canvas: canvas, image: wantImage,
+                                                    settle: options.settle))
                 // Fixtures simless generates (root, #Preview blocks) exist only in its hosts.
                 if b["ok"] as? Bool != true, (b["error"] as? String ?? "").hasPrefix("unknown fixture") {
                     if !simlessOnly.contains(fixture) { simlessOnly.append(fixture) }

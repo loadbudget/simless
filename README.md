@@ -197,7 +197,7 @@ simless test ui [Target/Class/method...]   your XCUITest UI tests, without a sim
       [--jobs <hosts>] [--device iphone|ipad|iphone,ipad] [--timeout <seconds per test>]
 simless test --simulator-only     the tests marked as needing a simulator, and the xcodebuild command for them
 simless calibrate [fixture]       compare renders with an iOS Simulator (boots one, run once per app)
-      [--dark] [--png <dir>] [--runtime <iOS version>] [--sim-device <name>] [--idiom phone]
+      [--dark] [--png <dir>] [--runtime <iOS version>] [--sim-device <name>] [--idiom phone] [--settle <ms>]
 simless status [--json]           hosts, test runs going on and their share of the Mac, disk use
 simless doctor [--json]           whether this Mac can run simless (macOS, Xcode, iOS SDK, disk), exit 1 if not
 simless down [--all]              stop this worktree's hosts, test and UI hosts included (--all: every worktree's,
