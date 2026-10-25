@@ -856,12 +856,12 @@ final class Session {
                 include = next.map { userID($0) }
                 inGroup = true
                 continue
-            case .hostDied(let running, let reason):
+            case .hostDied(let running, let reason, let symbols):
                 let open = running.filter { !done.contains($0) }
                 if open.count == 1 || (!parallel && !open.isEmpty) {
                     result.crashes.append((open[0], reason))
                     done.insert(open[0])
-                } else if let culprit = Self.onStack(open, CrashReport.lastSymbols) {
+                } else if let culprit = Self.onStack(open, symbols) {
                     result.crashes.append((culprit, reason))
                     done.insert(culprit)
                     groups.append(open.filter { $0 != culprit })
@@ -911,7 +911,8 @@ final class Session {
 
     enum End {
         case completed
-        case hostDied(running: [String], reason: String)
+        /// `symbols`: the crashed thread's, from the crash report and the host's log.
+        case hostDied(running: [String], reason: String, symbols: [String])
         case timedOut(String, others: [String])
     }
 
@@ -996,10 +997,12 @@ final class Session {
             case .timeout:
                 break
             case .closed:
-                let reason = CrashReport.summary(slot: slot, since: since) ?? "the host exited"
-                CrashReport.lastSymbols += Self.testFramesFromLog(slot)
+                // Stop the slot's processes before the wait for the report, which can
+                // take 90 s. This deletes neither host.log nor a report.
                 RuntimeHost.terminateAll(slot)
-                return (.hostDied(running: running.sorted { $0.value > $1.value }.map(\.key), reason: reason), finished)
+                let crash = CrashReport.summary(slot: slot, since: since)
+                return (.hostDied(running: running.sorted { $0.value > $1.value }.map(\.key), reason: crash.text,
+                                  symbols: crash.symbols + Self.testFramesFromLog(slot)), finished)
             }
             if let (id, start) = running.min(by: { $0.value < $1.value }), now() - start > timeout {
                 RuntimeHost.terminateAll(slot)

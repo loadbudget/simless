@@ -319,30 +319,65 @@ enum Render {
 
 /// What macOS's crash report says about a host that died.
 enum CrashReport {
+    /// Where macOS writes its crash reports.
+    static let reportsDir = "\(Paths.home)/Library/Logs/DiagnosticReports"
+    /// Seconds to look for the report before the host's log answers instead.
+    static let reportWait: Double = 4
+    /// Seconds after the first look to keep looking when the log has no
+    /// answer. macOS once wrote a report 52 s after the crash.
+    static let lateReportWait: Double = 90
+
     /// The exception and the first frames in the app or SwiftUI, from the
-    /// newest report for `slot` written after `since`. Reports appear a few
-    /// seconds after the crash.
-    static func summary(slot: SlotRecord, since: Date, wait: Double = 4) -> String? {
-        lastSymbols = []
-        let dir = "\(Paths.home)/Library/Logs/DiagnosticReports"
-        let deadline = now() + wait
-        repeat {
-            let files = ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []).filter { $0.hasSuffix(".ips") }
-                .map { "\(dir)/\($0)" }
-                .filter { (try? FileManager.default.attributesOfItem(atPath: $0)[.creationDate] as? Date).map { $0 >= since } ?? false }
-            for path in files {
+    /// newest report for `slot` that macOS captured after `since`, and every
+    /// symbol on its crashed thread (none without a report). Reports appear
+    /// seconds after the crash, or up to a minute: without one in `wait`, the
+    /// trap or the frames in the host's log answer, and without those it
+    /// looks until `lateWait` after the first look.
+    static func summary(slot: SlotRecord, since: Date, wait: Double = reportWait, lateWait: Double = lateReportWait,
+                        dir: String = reportsDir) -> (text: String, symbols: [String]) {
+        let start = ProcessInfo.processInfo.systemUptime
+        if let report = report(slot: slot, since: since, dir: dir, until: start + wait) { return report }
+        if let trap = hostTrap(slot) { return (trap + " (no crash report from macOS this time)", []) }
+        if let frames = handlerFrames(slot) { return (frames, []) }
+        Log.step("waiting up to \(Int(lateWait - (ProcessInfo.processInfo.systemUptime - start))) s for macOS's crash report of \(slot.slotID)")
+        return report(slot: slot, since: since, dir: dir, until: start + lateWait)
+            ?? ("the host process died, and macOS wrote no crash report within \(Int(lateWait)) s; run it in a simulator to see the crash", [])
+    }
+
+    /// The newest report for `slot` in `dir` that macOS captured after
+    /// `since`, looked for every half second until `deadline` (system uptime),
+    /// and once at it.
+    private static func report(slot: SlotRecord, since: Date, dir: String, until deadline: Double) -> (text: String, symbols: [String])? {
+        while true {
+            let born = ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []).filter { $0.hasSuffix(".ips") }
+                .compactMap { name -> (path: String, at: Date)? in
+                    let path = "\(dir)/\(name)"
+                    return (try? FileManager.default.attributesOfItem(atPath: path)[.creationDate] as? Date).map { (path, $0) }
+                }
+                .filter { $0.at >= since }
+            for (path, _) in born.sorted(by: { $0.at > $1.at }) {
                 guard let text = try? String(contentsOfFile: path, encoding: .utf8), let nl = text.firstIndex(of: "\n"),
                       let header = try? JSONSerialization.jsonObject(with: Data(text[..<nl].utf8)) as? [String: Any],
                       header["bundleID"] as? String == slot.slotID,
-                      let body = try? JSONSerialization.jsonObject(with: Data(text[text.index(after: nl)...].utf8)) as? [String: Any]
+                      let body = try? JSONSerialization.jsonObject(with: Data(text[text.index(after: nl)...].utf8)) as? [String: Any],
+                      let captured = captureTime(body), captured >= since
                 else { continue }
-                return describe(body) + " (report: \(path))"
+                let (what, symbols) = describe(body)
+                return (what + " (report: \(path))", symbols)
             }
-            Thread.sleep(forTimeInterval: 0.5)
-        } while now() < deadline
-        if let trap = hostTrap(slot) { return trap + " (no crash report from macOS this time)" }
-        if let frames = handlerFrames(slot) { return frames }
-        return "the host process died, and macOS wrote no crash report this time (it limits repeated ones); run it in a simulator to see the crash"
+            let left = deadline - ProcessInfo.processInfo.systemUptime
+            if left <= 0 { return nil }
+            Thread.sleep(forTimeInterval: min(0.5, left))
+        }
+    }
+
+    /// When macOS captured the crash: the body's `captureTime`
+    /// (`2026-10-24 18:28:58.0209 +0200`), nil when it has none.
+    static func captureTime(_ body: [String: Any]) -> Date? {
+        let format = DateFormatter()
+        format.locale = Locale(identifier: "en_US_POSIX")
+        format.dateFormat = "yyyy-MM-dd HH:mm:ss.SSSS Z"
+        return (body["captureTime"] as? String).flatMap(format.date(from:))
     }
 
     /// The crashed thread's top frames as SimlessRuntime's crash handler
@@ -381,11 +416,9 @@ enum CrashReport {
             .map { visibleText(String($0)) }
     }
 
-    /// Every symbol on the crashed thread of the last report `summary` read.
-    nonisolated(unsafe) static var lastSymbols: [String] = []
-
-    private static func describe(_ body: [String: Any]) -> String {
-        lastSymbols = ((body["threads"] as? [[String: Any]] ?? []).first { $0["triggered"] as? Bool == true }?["frames"] as? [[String: Any]] ?? [])
+    /// The report's summary line, and every symbol on its crashed thread.
+    private static func describe(_ body: [String: Any]) -> (text: String, symbols: [String]) {
+        let symbols = ((body["threads"] as? [[String: Any]] ?? []).first { $0["triggered"] as? Bool == true }?["frames"] as? [[String: Any]] ?? [])
             .compactMap { $0["symbol"] as? String }
         let exception = body["exception"] as? [String: Any] ?? [:]
         var what = exception["type"] as? String ?? "crash"
@@ -408,7 +441,7 @@ enum CrashReport {
         if what.contains("stack overflow"), frames.prefix(4).contains(where: { $0.contains("StyleableView._makeViewList") || $0.contains("StyleModifier") }) {
             text += ". This is a SwiftUI crash on the Mac, not your code (a Stepper drawn by ImageRenderer or under the phone idiom); mark the test simulator-only"
         }
-        return text
+        return (text, symbols)
     }
 }
 
