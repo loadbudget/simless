@@ -67,8 +67,8 @@ enum Idiom {
         let block: @convention(block) (UIWindow, UIViewController?) -> Void = { window, root in
             // Off the main thread UIKit itself complains; the idiom isn't followed there.
             guard Thread.isMainThread else { return original(window, sel, root) }
-            let phone = MainActor.assumeIsolated { phone(root) }
-            phoneWindows.withLockUnchecked { phone ? $0.add(window) : $0.remove(window) }
+            let isPhone = MainActor.assumeIsolated { phone(root) }
+            phoneWindows.withLockUnchecked { isPhone ? $0.add(window) : $0.remove(window) }
             original(window, sel, root)
         }
         method_setImplementation(m, imp_implementationWithBlock(block))
