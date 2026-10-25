@@ -162,6 +162,11 @@ enum Patch {
                     // side (the driver runs one job without -j: 3.5 s against 2.1 s for two
                     // edited files in a 700-file app).
                     "-j", "\(max(1, min(files.count + 1, ProcessInfo.processInfo.activeProcessorCount)))"]
+        // Xcode puts a local package's dynamic products here, not beside the app.
+        // Without it, `import <Product>` finds only the Clang module of its
+        // generated header, and every Swift-only type is "not in scope".
+        let packageFrameworks = "\(ws.productsIphoneos)/PackageFrameworks"
+        if exists(packageFrameworks) { args += ["-F", packageFrameworks] }
         if let iso = effective.isolation { args += ["-default-isolation", iso] }
         for f in effective.features { args += ["-enable-upcoming-feature", f] }
         for c in settings.conditions { args += ["-D", c] }
