@@ -3,6 +3,10 @@
 <!-- One section per version: `## 0.1.0 (2026-10-09)`. Notes for the next
      release go under `## Unreleased`. -->
 
+## Unreleased
+
+- **The kit builds in an app that treats warnings as errors on the iOS 26 SDK.** It called `UIWindow(frame:)`, which iOS 26 deprecates. The render window now belongs to the app's scene when one connects. On a Mac with no login session (SSH, a LaunchDaemon) no scene connects, and the kit makes a window with no scene, as before, through `NSObject.Type`, which names no deprecated initializer. Run `simless init` again to update the kit.
+
 ## 0.7.2 (2026-10-23)
 
 Fixes from running simless as the screen checker on customer apps in our pipeline: Form and List screens no longer crash the host under the phone idiom, `act` taps a button inside a card, and a List that loads after the first frame is read. All of it is in SimlessRuntime and the CLI, so no `simless init`.
