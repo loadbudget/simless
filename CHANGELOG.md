@@ -5,6 +5,7 @@
 
 ## Unreleased
 
+- **Previews that still don't compile after five rounds are reported.** Before, `simless up` saved a manifest with no dylib and counted every preview not left out as generated, so no preview fixture loaded and nothing said why. Now `up` prints `note: fixtures from #Preview blocks weren't built: previews still don't compile after 5 rounds (…); <first error>`, the summary counts 0 generated, and `previews.json` keeps the reason for each preview left out.
 - **The kit builds in an app that treats warnings as errors on the iOS 26 SDK.** It called `UIWindow(frame:)`, which iOS 26 deprecates. The render window now belongs to the app's scene when one connects. On a Mac with no login session (SSH, a LaunchDaemon) no scene connects, and the kit makes a window with no scene, as before, through `NSObject.Type`, which names no deprecated initializer. Run `simless init` again to update the kit.
 
 ## 0.7.2 (2026-10-23)
