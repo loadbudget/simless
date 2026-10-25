@@ -56,11 +56,22 @@ enum Paths {
     }
 }
 
-func shortHash(_ s: String) -> String {
-    // FNV-1a, enough to key cache directories.
+/// FNV-1a: enough to key cache directories and slots, not a checksum.
+func fnv1a(_ s: String) -> UInt64 {
     var h: UInt64 = 0xcbf29ce484222325
     for b in s.utf8 { h = (h ^ UInt64(b)) &* 0x100000001b3 }
-    return String(h, radix: 16).prefix(10).description
+    return h
+}
+
+func shortHash(_ s: String) -> String {
+    String(fnv1a(s), radix: 16).prefix(10).description
+}
+
+/// The slot number of a worktree: a hash of its path, in decimal. Each
+/// worktree gets its own number with no shared counter, and the number stays
+/// digits, which is what SimlessAgent's `.simless[0-9]+` check accepts.
+func slotNumber(forWorktree worktree: String) -> Int {
+    Int(fnv1a(worktree) % 10_000_000_000)
 }
 
 func mkdirp(_ path: String) throws {
@@ -267,7 +278,7 @@ func withToken<T>(_ name: String, count: Int, _ body: () throws -> T) throws -> 
 
 struct SlotRecord: Codable {
     var bundleBase: String      // e.g. com.example.app
-    var n: Int                  // slot number -> <bundleBase>.simless<n>
+    var n: Int                  // slotNumber(forWorktree:) -> <bundleBase>.simless<n>
     var worktree: String
     var port: Int
     var builtAt: Double = 0     // reference-date seconds of the last full build
@@ -298,24 +309,42 @@ struct GlobalState: Codable {
         try enc.encode(self).write(to: URL(fileURLWithPath: Paths.statePath), options: .atomic)
     }
 
-    /// Returns this worktree's slot, assigning the lowest free slot number and port.
-    /// A `kind` slot shares its render slot's number (app.simless1, app.simless1-test).
+    /// Returns this worktree's slot, with the number of its path and a free port.
+    /// A `kind` slot shares its render slot's number (app.simless<n>, app.simless<n>-test).
     static func slot(bundleBase: String, worktree: String, kind: String? = nil) throws -> SlotRecord {
         try withLock("state") {
             var s = load()
-            if let r = s.slots.first(where: { $0.bundleBase == bundleBase && $0.worktree == worktree && $0.kind == kind }) { return r }
-            let usedN = Set(s.slots.filter { $0.bundleBase == bundleBase && $0.kind == kind }.map(\.n))
-            let usedPorts = Set(s.slots.map(\.port))
-            let sibling = s.slots.first { $0.bundleBase == bundleBase && $0.worktree == worktree && $0.kind == nil }?.n
-            let n = sibling.flatMap { usedN.contains($0) ? nil : $0 } ?? (1...).first { !usedN.contains($0) }!
-            // Free in the records and on the machine: another program may hold one.
-            let port = (47800...65000).first { !usedPorts.contains($0) && portIsFree($0) } ?? (47800...).first { !usedPorts.contains($0) }!
-            var r = SlotRecord(bundleBase: bundleBase, n: n, worktree: worktree, port: port)
-            r.kind = kind
-            s.slots.append(r)
+            let (r, replaced) = try s.assign(bundleBase: bundleBase, worktree: worktree, kind: kind) { usedPorts in
+                // Free in the records and on the machine: another program may hold one.
+                (47800...65000).first { !usedPorts.contains($0) && portIsFree($0) } ?? (47800...).first { !usedPorts.contains($0) }!
+            }
+            for old in replaced {
+                Log.step("moving \(old.slotID) to \(r.slotID): slots are now numbered by worktree path")
+                Cleanup.removeSlot(old)
+            }
             try s.save()
             return r
         }
+    }
+
+    /// The slot of `worktree`, added if it has none. A slot of that worktree
+    /// under an older number comes back in `replaced`, for the caller to remove.
+    /// Two worktrees whose paths hash to one number throw, because they would
+    /// share an app container.
+    mutating func assign(bundleBase: String, worktree: String, kind: String?,
+                         port: (Set<Int>) -> Int) throws -> (SlotRecord, replaced: [SlotRecord]) {
+        let n = slotNumber(forWorktree: worktree)
+        let same = { (r: SlotRecord) in r.bundleBase == bundleBase && r.kind == kind }
+        if let r = slots.first(where: { same($0) && $0.worktree == worktree && $0.n == n }) { return (r, []) }
+        if let other = slots.first(where: { same($0) && $0.n == n }) {
+            throw SimlessError("\(other.worktree) and \(worktree) both hash to slot \(other.slotID); move one of them")
+        }
+        let replaced = slots.filter { same($0) && $0.worktree == worktree }
+        slots.removeAll { same($0) && $0.worktree == worktree }
+        var r = SlotRecord(bundleBase: bundleBase, n: n, worktree: worktree, port: port(Set(slots.map(\.port))))
+        r.kind = kind
+        slots.append(r)
+        return (r, replaced)
     }
 
     static func update(_ record: SlotRecord) throws {
