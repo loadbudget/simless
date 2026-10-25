@@ -200,11 +200,11 @@ Two further safeguards:
 Hosts and the agent are already long-lived processes, so the CLI coordinates with `flock`:
 
 - **Locks:**
-  - `state`: slot and port assignments in `~/Library/Caches/simless/state.json`,
+  - `state-<hash>`: a worktree's slot records, in `state.json` of its work folder (`~/Library/Caches/simless/work/<hash>-<name>/`), next to its slots in `slots/`,
   - `install`: one install machine-wide,
   - `build-<k>`: a few concurrent full builds,
   - `build-<worktree>`: one xcodebuild at a time in a worktree's build folder.
-- **Garbage collection** runs on every command and removes hosts, slots, LaunchServices registrations and build caches of worktrees that no longer exist.
+- **Garbage collection** runs on every command and removes hosts, slots, LaunchServices registrations and build caches of worktrees that no longer exist. It stops a worktree's hosts, then deletes its work folder.
 - **Size limits:** only the newest 3 patches are kept per worktree, the shared Xcode compilation cache is cleared above 8 GB, and everything simless keeps stays under 25 GB (`SIMLESS_DISK_LIMIT_GB`). Over that, `simless up` removes the builds and slots of the least recently used worktrees, never one used in the last hour, then the shared compilation cache.
 - **Unused worktrees** (no simless command for two weeks) lose their hosts, slots and builds, and crash reports of simless hosts go after a day.
 - **`simless clean [--all]`** removes everything simless created.

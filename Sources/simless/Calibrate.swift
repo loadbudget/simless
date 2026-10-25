@@ -37,7 +37,7 @@ enum Calibrate {
         let udid = try createSimulator(runtime: options.runtime, device: deviceType)
         defer { deleteSimulator(udid) }
         // Not a port another worktree's stopped host would listen on again.
-        let simPort = try freePort(avoiding: Set(GlobalState.load().slots.map(\.port)))
+        let simPort = try freePort(avoiding: Set(GlobalState.all().map(\.port)))
         try buildAndLaunch(ws: ws, udid: udid, port: simPort)
         let sim = try LineClient(port: simPort, timeout: 30)
         var mac = try host.client(timeout: 30)
