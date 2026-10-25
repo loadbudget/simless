@@ -271,7 +271,9 @@ enum Calibrate {
             let r = try Shell.run(["xcodebuild", "build", "-project", project, "-scheme", ws.config.scheme,
                                    "-configuration", "Debug", "-destination", "platform=iOS Simulator,id=\(udid)",
                                    "-derivedDataPath", dd, "-skipMacroValidation", "-skipPackagePluginValidation",
-                                   "CODE_SIGNING_ALLOWED=NO"], cwd: ws.root, logPath: log)
+                                   "CODE_SIGNING_ALLOWED=NO",
+                                   // The kit compiles only under this condition.
+                                   "SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) \(Workspace.condition)"], cwd: ws.root, logPath: log)
             guard r.code == 0 else { throw SimlessError("simulator build failed:\n" + Patch.compilerErrors(r.out)) }
         }
         let app = "\(dd)/Build/Products/Debug-iphonesimulator/\(settings.wrapperName)"

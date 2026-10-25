@@ -9,7 +9,7 @@
 // Hot reload recompiles this file together with the edited view files, so
 // fixtures always render the latest code. Keep it to view construction:
 // seed data, environment objects, fixed dates, no network.
-#if DEBUG && os(iOS)
+#if SIMLESS
 import SwiftUI
 
 @MainActor

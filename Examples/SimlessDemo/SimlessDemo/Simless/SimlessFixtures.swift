@@ -4,7 +4,7 @@
 // without warranty of any kind.
 
 // Fixtures for `simless render`: each one builds a screen in a deterministic state.
-#if DEBUG && os(iOS)
+#if SIMLESS
 import SwiftUI
 
 @MainActor

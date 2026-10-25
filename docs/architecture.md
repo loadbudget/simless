@@ -66,7 +66,7 @@ A slot is installed through a zero-test `xcodebuild test-without-building -only-
 
 ## 3. The render host (SimlessKit)
 
-`SimlessKit.swift` is a single `#if DEBUG` file that `simless init` adds to the app. It does nothing unless the app is launched with `--simless-port`. When it is, it:
+`SimlessKit.swift` is a single `#if SIMLESS` file that `simless init` adds to the app. It does nothing unless the app is launched with `--simless-port`. When it is, it:
 
 - **Hides the app** whenever simless launched it, including the install and unit-test runs, which carry `SIMLESS_HEADLESS=1` in their `.xctestrun`:
   - during `App.init`, before any window exists, it makes AppKit's window-ordering calls no-ops.
@@ -220,4 +220,4 @@ See [How far to trust results](../README.md#how-far-to-trust-results) for what a
 - **The Mac's Swift runtime:** tests run against the Mac's system libraries, not the simulator's. Plain CPU work runs at the simulator's speed, but unoptimized generic code can be slower.
 - **Project shape:** needs an `.xcodeproj` (at the root or in a subfolder) with an app-hosted unit-test target.
 - **Side effects:** the host runs the app's real startup. Render hosts get no network through URL Loading, but WKWebView, raw sockets and other side effects need a `SimlessHost.isActive` guard.
-- **Private APIs:** the hosts use private, DEBUG-only Apple APIs (`_AXSSetAutomationEnabled`, NSApplication activation policy via the ObjC runtime, `sandbox_extension_consume`, CoreText's text-style tables, UIKit's touch and gesture-container internals) that an OS update could change.
+- **Private APIs:** the hosts use private Apple APIs, compiled only into simless builds, (`_AXSSetAutomationEnabled`, NSApplication activation policy via the ObjC runtime, `sandbox_extension_consume`, CoreText's text-style tables, UIKit's touch and gesture-container internals) that an OS update could change.

@@ -151,6 +151,7 @@ func cmdInit(_ args: Args) throws {
     if newFixtures {
         try fm.copyItem(atPath: "\(Paths.toolRoot)/Templates/SimlessFixtures.swift", toPath: fixtures)
     }
+    let movedFixtures = newFixtures ? false : try moveOldGuard(in: fixtures, followedBy: .fixtures)
 
     // The generated build-variant project and test plans stay out of git
     // without touching .gitignore.
@@ -172,14 +173,14 @@ func cmdInit(_ args: Args) throws {
         : "wrote \(Workspace.configName): project \(project), scheme \(scheme), app \(appTarget), tests \(testTarget.isEmpty ? "none" : testTarget)\(packages.isEmpty ? "" : ", packages " + packages.joined(separator: ", "))"
     print("""
         \(configLine)
-        wrote \(config.kitFile)\(newFixtures ? " and \(config.fixturesFile)" : "")
+        wrote \(config.kitFile)\(newFixtures ? " and \(config.fixturesFile)" : "")\(movedFixtures ? "; moved \(config.fixturesFile) under #if \(Workspace.condition)" : "")
 
         Next:
           1. \(synced ? "Both files are in a synchronized folder of \(appTarget), so Xcode picks them up."
                 : "\(config.kitDir) isn't in a folder Xcode syncs for \(appTarget): add both files to the \(appTarget) target (in Xcode: File > Add Files, with \(appTarget) checked under Targets)\(synchronized.isEmpty ? "" : ", or move the folder into one of \(synchronized.prefix(5).joined(separator: ", "))"). Until then, `simless up` fails with \"cannot find 'SimlessHost' in scope\".")
           2. \(hook.map { "App hook: \($0)" } ?? """
         In your App's init(), add:
-                 #if DEBUG && os(iOS)
+                 #if SIMLESS
                  SimlessHost.startIfRequested()
                  #endif
         """)
@@ -276,6 +277,7 @@ func initTemplate(_ dir: String, _ args: Args) throws {
     try FileManager.default.copyItem(atPath: "\(Paths.toolRoot)/Templates/SimlessKit.swift", toPath: "\(root)/\(config.kitFile)")
     let newFixtures = !exists("\(root)/\(config.fixturesFile)")
     if newFixtures { try FileManager.default.copyItem(atPath: "\(Paths.toolRoot)/Templates/SimlessFixtures.swift", toPath: "\(root)/\(config.fixturesFile)") }
+    let movedFixtures = newFixtures ? false : try moveOldGuard(in: "\(root)/\(config.fixturesFile)", followedBy: .fixtures)
 
     let compiled = sourceDirs.contains { kitDir == $0 || kitDir.hasPrefix($0 + "/") }
     let appFile: String? = {
@@ -288,9 +290,10 @@ func initTemplate(_ dir: String, _ args: Args) throws {
         return nil
     }()
     let hooked = appFile.flatMap { try? String(contentsOfFile: "\(root)/\($0)", encoding: .utf8) }?.contains("SimlessHost.startIfRequested()") == true
+    let movedHook = !hooked ? false : try moveOldGuard(in: "\(root)/\(appFile!)", followedBy: .hook)
     print("""
         \(keep ? "kept" : "wrote") \(Workspace.configName): project \(name).xcodeproj, app \(appTarget), tests \(testTarget.isEmpty ? "none" : testTarget)
-        wrote \(config.kitFile)\(newFixtures ? " and \(config.fixturesFile)" : "")
+        wrote \(config.kitFile)\(newFixtures ? " and \(config.fixturesFile)" : "")\(movedFixtures ? "; moved \(config.fixturesFile) under #if \(Workspace.condition)" : "")
         """)
     if compiled {
         print("project.yml: nothing to add, \(kitDir) is inside \(appTarget)'s sources (\(sourceDirs.joined(separator: ", ")))")
@@ -305,16 +308,36 @@ func initTemplate(_ dir: String, _ args: Args) throws {
             """)
     }
     if hooked {
-        print("App hook: already in \(appFile!)")
+        print(movedHook ? "App hook: moved under #if \(Workspace.condition) in \(appFile!)" : "App hook: already in \(appFile!)")
     } else {
         print("""
             App hook: add this to the App's init()\(appFile.map { " in \($0)" } ?? ""), so the app answers simless:
 
-                #if DEBUG && os(iOS)
+                #if SIMLESS
                 SimlessHost.startIfRequested()
                 #endif
             """)
     }
+}
+
+/// What follows the old guard: the App hook, or the fixtures file's imports.
+enum OldGuarded: String {
+    case hook = #"\s*\n\s*SimlessHost\.startIfRequested\(\)"#
+    case fixtures = #"[ \t]*\n(?:\s*\n)*import\b"#
+}
+
+/// Kits before `#if SIMLESS` put the App hook and the fixtures file under
+/// `#if DEBUG && os(iOS)`. The kit no longer compiles in a plain Debug build,
+/// so neither may they. Moves each such guard in `path` that `followedBy`
+/// matches right after to `#if SIMLESS`, and returns whether it moved one.
+func moveOldGuard(in path: String, followedBy: OldGuarded) throws -> Bool {
+    guard let s = try? String(contentsOfFile: path, encoding: .utf8) else { return false }
+    let text = NSMutableString(string: s)
+    let oldGuard = try! NSRegularExpression(pattern: #"#if DEBUG && os\(iOS\)("# + followedBy.rawValue + ")")
+    guard oldGuard.replaceMatches(in: text, range: NSRange(location: 0, length: text.length),
+                                  withTemplate: "#if \(Workspace.condition)$1") > 0 else { return false }
+    try (text as String).write(toFile: path, atomically: true, encoding: .utf8)
+    return true
 }
 
 /// Adds `SimlessHost.startIfRequested()` to the `@main` App's init().
@@ -322,7 +345,7 @@ func initTemplate(_ dir: String, _ args: Args) throws {
 func insertHook(in sourceDir: String) throws -> String? {
     let call = "SimlessHost.startIfRequested()"
     func block(_ indent: String) -> String {
-        ["#if DEBUG && os(iOS)", call, "#endif"].map { indent + $0 + "\n" }.joined()
+        ["#if \(Workspace.condition)", call, "#endif"].map { indent + $0 + "\n" }.joined()
     }
     guard let e = FileManager.default.enumerator(atPath: sourceDir) else { return nil }
     while let rel = e.nextObject() as? String {
@@ -331,7 +354,10 @@ func insertHook(in sourceDir: String) throws -> String? {
         guard var s = try? String(contentsOfFile: path, encoding: .utf8),
               let decl = s.range(of: #"@main\s+struct\s+\w+\s*:\s*([\w.]+\s*,\s*)*App\b[^{]*\{"#, options: .regularExpression)
         else { continue }
-        if s.contains(call) { return "already present in \(rel)" }
+        if s.contains(call) {
+            return try moveOldGuard(in: path, followedBy: .hook)
+                ? "moved under #if \(Workspace.condition) in \(rel)" : "already present in \(rel)"
+        }
         // An existing init(): add the call as its first statement.
         if let initRange = s.range(of: #"\n([ \t]*)init\(\)\s*\{[ \t]*\n"#, options: .regularExpression, range: decl.upperBound..<s.endIndex) {
             let indent = String(s[initRange].dropFirst().prefix { $0 == " " || $0 == "\t" }) + "    "

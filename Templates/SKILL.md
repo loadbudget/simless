@@ -18,7 +18,7 @@ simless status        # fails with "no .simless.json" if the repo isn't set up
 If it isn't set up, do it yourself:
 
 1. Run `simless init` at the repo root. It writes `.simless.json` and `<App>/Simless/SimlessKit.swift` (generated, never edit), creates `SimlessFixtures.swift`, and adds the hook to the `@main` App's `init()`. Check the hook compiles. If the project doesn't use synchronized folders, add both Simless files to the app target.
-2. If app startup has side effects that a background render host shouldn't trigger (analytics, sync, network), guard them: `if !SimlessHost.isActive { ... }` (DEBUG only).
+2. If app startup has side effects that a background render host shouldn't trigger (analytics, sync, network), guard them: `if !SimlessHost.isActive { ... }`, inside `#if SIMLESS`.
 3. Register fixtures (below), then run `simless up`. The first build takes a few minutes; later ones are incremental.
 
 `simless init` needs an Xcode project (not a workspace). A unit-test target is optional. simless needs no certificate, profile or other setup: if `simless up` asks for one, the project is in the `dfi` mode (`"mode": "dfi"` in `.simless.json`), so tell the user instead of improvising.
@@ -30,7 +30,7 @@ Some exist without any code: `root` (the app's first window, as the `@main` App 
 `SimlessFixtures.swift` is normal app code:
 
 ```swift
-#if DEBUG && os(iOS)
+#if SIMLESS
 import SwiftUI
 
 @MainActor
