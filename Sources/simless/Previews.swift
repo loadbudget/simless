@@ -239,7 +239,7 @@ enum Previews {
                 if let only, !only.contains(f.entry.name) { continue }
                 var entry = f.entry
                 let made: Result<String, SimlessError> = inPackage(input, file)
-                    ? .failure(SimlessError("it's in a local package; only the app target's previews are generated"))
+                    ? .failure(SimlessError(inPackageReason))
                     : skip[Key(file: file, name: entry.name)].map { .failure(SimlessError($0)) } ?? f.make(entry.name)
                 switch made {
                 case .success(let code):
@@ -320,7 +320,7 @@ enum Previews {
             guard let close = closingParen(u, from: i) else { return .failure(SimlessError("unbalanced #Preview arguments")) }
             let args = ns.substring(with: NSRange(location: i, length: close - i))
             if args.range(of: #"\bas\s*:"#, options: .regularExpression) != nil {
-                return .failure(SimlessError("a widget or Live Activity preview, not a view"))
+                return .failure(SimlessError(widgetReason))
             }
             i = close + 1
         }
@@ -586,6 +586,23 @@ enum Previews {
             Log.info("  note: fixtures from #Preview blocks not loaded (\(error))")
             return "\(error)"
         }
+    }
+
+    /// Why a preview is left out by design, not for an error: one in a local
+    /// package, and one of a widget or Live Activity.
+    static let inPackageReason = "it's in a local package; only the app target's previews are generated"
+    static let widgetReason = "a widget or Live Activity preview, not a view"
+
+    /// Why `simless up --strict` fails, or nil when every entry that can
+    /// render was generated: an entry left out, or every entry when the
+    /// previews have no library. An entry left out by design never counts.
+    static func strictFailure(_ m: Manifest, root: String, manifestPath: String) -> String? {
+        let app = m.entries.filter { $0.skipped != inPackageReason && $0.skipped != widgetReason }
+        let missing = m.dylib == nil ? app.count : app.filter { $0.skipped != nil }.count
+        guard missing > 0 else { return nil }
+        let why = m.failure.map { "; \($0)" } ?? ""
+        return "--strict: \(missing) of \(app.count) previews not generated\(why); "
+            + (summary(m, root: root, manifestPath: manifestPath) ?? "")
     }
 
     /// One line for `simless up`: what was generated and what was left out.

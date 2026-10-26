@@ -7,8 +7,9 @@ let usage = """
 simless: fast, headless, simulator-free SwiftUI checks for AI agents.
 
   simless init [--template <dir>]  set up this repo (.simless.json); removes the SimlessKit and App hook older versions added
-  simless up [--no-tests]          build for iOS, install this worktree's slot (unsigned), start its host;
+  simless up [--no-tests] [--strict]   build for iOS, install this worktree's slot (unsigned), start its host;
         also prepares local packages' tests and the test hosts (--no-tests skips that)
+        --strict: exit 1 when a #Preview or the App is left out or the previews don't load
   simless render <fixture|all>     render and print the accessibility tree + issues
   simless act <fixture> <step>...  render, then tap/type/swipe/longpress/wait, then print the tree + issues
         steps: tap "<label|#id>"  type "<#id|label>" "<text>"  swipe up|down|left|right [on "<label|#id>"]
@@ -401,6 +402,16 @@ func cmdUp(_ args: Args) throws {
     if let note = skillNote() { print(note) }
     testsReady.wait()
     Cleanup.enforceDiskLimit(keeping: ws)
+    // The host runs and renders what was built; --strict fails the command
+    // when a preview isn't among it, so a pipeline sees the one that broke.
+    if args.flags.contains("--strict") {
+        if let previewsError { throw SimlessError("--strict: the previews weren't built: \(previewsError)") }
+        if let m = Previews.manifest(ws),
+           let failure = Previews.strictFailure(m, root: ws.root, manifestPath: Previews.manifestPath(ws)) {
+            throw SimlessError(failure)
+        }
+        if let notLoaded { throw SimlessError("--strict: the previews weren't loaded into the host: \(notLoaded)") }
+    }
 }
 
 func cmdRender(_ args: Args) throws {

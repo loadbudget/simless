@@ -182,6 +182,7 @@ simless init                      set up a repo: write .simless.json, remove an 
       [--template <dir>]          an xcodegen app template instead: no project edits
 simless up [--no-tests] [--json]  build, prepare this worktree's host, start it, and prepare local packages'
                                   tests and the test hosts, so the first `simless test` only runs tests
+      [--strict]                  exit 1 when a #Preview or the App is left out or the previews don't load
 simless render <fixture|all>      accessibility tree + issues
       [--dark] [--device iphone|iphone-small|iphone-max|ipad] [--matrix] [--png <file|dir>] [--json]
       [--locale <lang>] [--text-size xs…xxxl|ax1…ax5] [--idiom phone] [--settle <ms>]

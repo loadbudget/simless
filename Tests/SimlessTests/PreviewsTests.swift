@@ -281,6 +281,38 @@ final class PreviewsTests: XCTestCase {
                        "previews: 1 of 2 generated; left out: ContentView.Short in Core/ContentView.swift (it's in a local package; only the app target's previews are generated)")
     }
 
+    func testStrictPassesWhenOnlyALocalPackagesPreviewIsLeftOut() {
+        var i = PatchScope.Input()
+        i.sources = ["/w/App/ContentView.swift": shortPreview, "/w/Core/ContentView.swift": shortPreview]
+        i.moduleOf = ["/w/Core/ContentView.swift": "Core"]
+        let m = Previews.Manifest(dylib: "/tmp/previews.dylib", entries: Previews.generate(i, skip: [:]).entries)
+        XCTAssertNil(Previews.strictFailure(m, root: "/w", manifestPath: "/w/previews.json"))
+    }
+
+    func testStrictFailsWhenAnAppPreviewIsLeftOut() throws {
+        var compiled = 0
+        let m = try Previews.compileLeavingOut(twoApps()) { _, _ in
+            compiled += 1
+            if compiled == 1 { throw SimlessError("patch compile failed\n/w/Watch/NotesWatchApp.swift:2:8: error: no such module 'WatchKit'") }
+            return "/tmp/previews.dylib"
+        }
+        XCTAssertEqual(Previews.strictFailure(m, root: "/w", manifestPath: "/w/previews.json"),
+                       "--strict: 1 of 6 previews not generated; previews: 5 of 7 generated; left out: NotesWatchApp.root (doesn't compile outside Xcode's previews: no such module 'WatchKit'); NoteRow.3 (a widget or Live Activity preview, not a view)")
+    }
+
+    func testStrictFailsWhenThePreviewsHaveNoLibrary() {
+        let m = Previews.Manifest(dylib: nil, entries: [.init(name: "A", file: "/w/A.swift", line: 1)],
+                                  failure: "previews still don't compile after 5 rounds")
+        XCTAssertEqual(Previews.strictFailure(m, root: "/w", manifestPath: "/w/previews.json"),
+                       "--strict: 1 of 1 previews not generated; previews still don't compile after 5 rounds; previews: 0 of 1 generated")
+    }
+
+    func testStrictPassesWhenOnlyAWidgetPreviewIsLeftOut() throws {
+        let m = try Previews.compileLeavingOut(twoApps()) { _, _ in "/tmp/previews.dylib" }
+        XCTAssertEqual(m.entries.compactMap(\.skipped), [Previews.widgetReason])
+        XCTAssertNil(Previews.strictFailure(m, root: "/w", manifestPath: "/w/previews.json"))
+    }
+
     func testAPatchCompilesWhatItAsksForAsTheBuildNamedIt() throws {
         let m = try Previews.compileLeavingOut(twoApps()) { _, _ in "/tmp/previews.dylib" }
         var manifest = m
